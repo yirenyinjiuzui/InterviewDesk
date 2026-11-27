@@ -29,6 +29,11 @@ bin/
 .npmrc
 settings.json
 sessions.json
+knowledge.md
+resume.txt
+resume.md
+简历*.txt
+简历*.md
 Local State
 .env*
 /HANDOFF.md
@@ -43,8 +48,10 @@ Local State
 *.f32
 *.pdf
 *.docx
-!app/test/fixtures/en_test.*
-!app/test/fixtures/zh_16k.*
+!app/test/fixtures/en_test.f32
+!app/test/fixtures/en_test.wav
+!app/test/fixtures/zh_16k.f32
+!app/test/fixtures/zh_16k.wav
 !app/test/fixtures/sample.pdf
 !app/test/fixtures/sample.docx
 !app/resources/test-audio/asr-test-en.wav
