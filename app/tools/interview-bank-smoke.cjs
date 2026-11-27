@@ -149,6 +149,17 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  const restoredB = (await read()).sessions.find(s => s.id === secondRole.id);
  assert.equal(restoredB.jdText, 'Synthetic job B');
  assert.equal((await ask('How do you evaluate retrieval?', {resume:restoredB.resumeText,jd:restoredB.jdText})).text.split('\n')[0], 'I prepared this answer for role B.');
+ // Preparing a reduced B draft must not publish its removal of A's saved question.
+ await setValue('.session-bar select', secondRole.id);
+ await click('面试资料');await click('题库');
+ await setValue('[data-library=questions]', prepared.questions[1]);
+ await click('准备全部答案');
+ await wait(() => ev('document.querySelector(".library-panel").innerText.includes("已准备 1 道")'));
+ await click('关闭');
+ await setValue('.session-bar select', session.id);
+ await click('面试资料');await click('题库');
+ assert.match(await ev('document.querySelector("[data-bank-english]").value'), /using a held-out set/);
+ await click('关闭');
  // A completed answer survives stopping and closing, while the draft resume stays private to the dialog.
  await setValue('.session-bar select', secondRole.id);
  await click('面试资料');
@@ -166,6 +177,15 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  await wait(() => ev('!!document.querySelector("#current-interview-question")'));
  const afterStop = await ev('window.mc.getLibrary()');
  assert.ok(afterStop.answers[draftQuestion]);
+ assert.ok(afterStop.questions.includes(prepared.questions[0]), 'preparing a reduced draft must not remove an already saved question');
+ await setValue('.session-bar select', session.id);
+ await click('面试资料');await click('题库');
+ assert.match(await ev('document.querySelector("[data-bank-english]").value'), /using a held-out set/, 'role A answer survives preparation in B');
+ await click('关闭');
+ await setValue('.session-bar select', secondRole.id);
+ await click('面试资料');await click('题库');
+ assert.equal(await ev('document.querySelector("[data-bank-english]").value'), 'I prepared this answer for role B.');
+ await click('关闭');
  assert.equal(afterStop.resumeText, restoredB.resumeText, 'preparing must preserve the published default');
  assert.equal((await read()).sessions.find(s => s.id === secondRole.id).resumeText, restoredB.resumeText);
  const beforeApply = await create();
@@ -174,7 +194,7 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  await click('面试资料');
  await setValue('[data-library=resume]', draftResume);
  await click('题库');
- assert.match(await ev('document.querySelector("[data-bank-english]").value'), /held-out/);
+ assert.match(await ev(`[...document.querySelectorAll("[data-bank-english]")].find(el => el.dataset.bankEnglish === ${JSON.stringify(draftQuestion)}).value`), /held-out/);
  await click('保存并用于本场');
  await wait(() => ev('!document.querySelector(".library-panel")'));
  assert.equal((await create()).resumeText, draftResume);

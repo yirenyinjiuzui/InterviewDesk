@@ -86,7 +86,7 @@ export function InterviewLibraryPanel({ library, sessions, current, hasLegacyFil
             resume: draft.resumeText, jd: draft.jdText, personalInfo: info });
           if (!preparing.current) break;
           next[question] = answer;
-          await onSave({ questions, answers: { ...next } });
+          await onSave({ mode: 'prepare', questions: [question], answers: { [question]: answer } });
           setAnswers({ ...next });
         }
         completed++;
