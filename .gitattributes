@@ -1,0 +1,14 @@
+* text=auto
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.patch text eol=lf whitespace=-blank-at-eol
+*.cs text eol=lf
+*.cmd text eol=crlf
+*.exe binary
+*.wav binary
+*.f32 binary
+*.pdf binary
+*.docx binary
+*.png binary
+*.ico binary

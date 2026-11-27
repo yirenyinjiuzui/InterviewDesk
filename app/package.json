@@ -1,0 +1,60 @@
+{
+  "name": "meeting-copilot",
+  "version": "0.3.17",
+  "description": "Real-time meeting/interview copilot for Windows and macOS: streaming ASR (local FunASR / cloud) and first-person answers via BYOK LLM",
+  "main": "./out/main/index.js",
+  "author": "JWM0203",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yirenyinjiuzui/InterviewDesk.git"
+  },
+  "private": true,
+  "scripts": {
+    "dev": "node tools/prepare-capture.mjs && electron-vite dev",
+    "build": "node tools/prepare-capture.mjs && electron-vite build && node tools/write-build-manifest.mjs",
+    "start": "electron-vite preview",
+    "postinstall": "patch-package",
+    "test": "vitest run",
+    "test:python": "node tools/run-python-tests.mjs",
+    "test:all": "npm test && npm run test:python",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "verify": "npm run typecheck && npm test && npm run build",
+    "verify:patched": "node tools/verify-patched.mjs",
+    "dist:dir": "npm run build && npm run verify:patched && electron-builder --dir",
+    "dist:win": "npm run build && npm run verify:patched && electron-builder --win nsis portable --publish never",
+    "harness": "node tools/asr-harness.mjs",
+    "smoke:materials": "node tools/interview-materials-smoke.cjs",
+    "smoke:reading": "node tools/interview-reading-smoke.cjs",
+    "smoke:questions": "node tools/interview-question-smoke.cjs",
+    "smoke:interview": "node tools/interview-preflight-smoke.cjs",
+    "smoke:llm": "vite-node tools/llm-smoke.ts",
+    "smoke:asr:realtime": "node tools/rt-asr-smoke.mjs",
+    "smoke:e2e:llm": "node tools/e2e-llm.mjs",
+    "smoke:e2e:local": "node tools/e2e-local-lifecycle.mjs",
+    "smoke:packaged": "node tools/packaged-smoke.mjs"
+  },
+  "dependencies": {
+    "@breezystack/lamejs": "1.2.7",
+    "@huggingface/transformers": "3.8.1",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "41.1.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^3.1.0",
+    "patch-package": "^8.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^3.1.0"
+  }
+}

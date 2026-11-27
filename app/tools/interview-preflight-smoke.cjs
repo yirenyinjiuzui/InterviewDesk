@@ -1,0 +1,68 @@
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const {spawn,execFileSync} = require('child_process');
+const appRoot = path.resolve(__dirname,'..');
+const electron = process.env.MC_TEST_EXE || require(path.join(appRoot,'node_modules/electron'));
+const WebSocket = require(path.join(appRoot,'node_modules/ws'));
+const assert = require('assert/strict');
+const workDir = path.join(appRoot,'..','work');
+fs.mkdirSync(workDir,{recursive:true});
+const dir = fs.mkdtempSync(path.join(workDir,'item1-profile-'));
+fs.writeFileSync(path.join(dir,'settings.json'), JSON.stringify({version:2,onboarding:{schemaVersion:1,completed:true},ui:{workspace:'interview',stealth:false,lang:'zh'},asr:{backend:'cloud-realtime',realtime:{baseUrl:'wss://example.invalid/asr',model:'fixture'}}}));
+let child,ws,seq=0;const pending=new Map(), calls=[];
+const server=http.createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;const body=JSON.parse(raw);calls.push({url:req.url,body,auth:req.headers.authorization});if(body.model==='hang')return;res.setHeader('Content-Type','application/json');if(req.url.startsWith('/old')){res.statusCode=401;res.end('{}');return;}if(body.stream){res.setHeader('Content-Type','text/event-stream');res.end('data: '+JSON.stringify({choices:[{delta:{content:'你能介绍一下最近的项目吗？'}}]})+'\n\ndata: [DONE]\n\n');return;}res.end(JSON.stringify({choices:[{message:{content:'你能介绍一下最近的项目吗？'}}]}));});
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const wait=async fn=>{for(let i=0;i<100;i++){const value=await fn();if(value)return value;await sleep(100);}throw Error('Timed out');};
+const cmd=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq;pending.set(id,{resolve,reject});ws.send(JSON.stringify({id,method,params}));});
+const ev=async expression=>{const r=await cmd('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;};
+const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].find(x=>x.textContent.includes(${JSON.stringify(label)}));if(!b)throw Error('button missing');b.click();return true;})()`);
+(async()=>{try{
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;
+ const debugServer=http.createServer();await new Promise(r=>debugServer.listen(0,'127.0.0.1',r));const debugPort=debugServer.address().port;await new Promise(r=>debugServer.close(r));
+ child=spawn(electron,[...(process.env.MC_TEST_EXE?[]:[appRoot]),`--remote-debugging-port=${debugPort}`],{cwd:appRoot,env:{...process.env,MC_USERDATA:dir},stdio:['ignore','pipe','pipe'],windowsHide:true});
+ let logs='';child.stdout.on('data',x=>logs+=x);child.stderr.on('data',x=>logs+=x);
+ const tab=await wait(async()=>{try{return (await(await fetch(`http://127.0.0.1:${debugPort}/json`)).json()).find(x=>x.type==='page'&&x.url.includes('index.html'));}catch{return null;}});
+ ws=new WebSocket(tab.webSocketDebuggerUrl);await new Promise(r=>ws.once('open',r));ws.on('message',raw=>{const r=JSON.parse(raw);if(r.id&&pending.has(r.id)){const p=pending.get(r.id);pending.delete(r.id);r.error?p.reject(Error(JSON.stringify(r.error))):p.resolve(r.result);}});
+ await wait(()=>ev('!!window.mc && !!document.querySelector(".workspace-tabs")'));
+ const patch={llm:{baseUrl:`http://127.0.0.1:${port}/old`,model:'old',apiKey:'fixture-old',answerWithVision:true,answerLang:'english'},vision:{baseUrl:`http://127.0.0.1:${port}/disabled`,model:'disabled',apiKey:'fixture-disabled',interviewEnabled:false,additional:[{baseUrl:`http://127.0.0.1:${port}/active`,model:'active',apiKey:'fixture-active',interviewEnabled:true},{baseUrl:`http://127.0.0.1:${port}/second`,model:'second',apiKey:'fixture-second',interviewEnabled:true}]}};
+ await ev(`window.mc.setSettings(${JSON.stringify(patch)})`);await cmd('Page.reload');await sleep(700);await wait(()=>ev('!!document.querySelector(".workspace-tabs")'));
+ await click('会前检查');await wait(()=>ev('!!document.querySelector(".health-panel")'));await sleep(250);assert.equal(calls.length,0,'opening preflight must not call model');
+ let text=await ev('document.querySelector(".health-panel").innerText');assert.match(text,/英文/);assert.match(text,/vision-2: active/);assert.match(text,/未加载/);assert.match(text,/尚未验证/);
+ await click('验证实际翻译');await wait(()=>ev('document.querySelector(".health-panel").innerText.includes("已返回文本，请核对译文")'));assert.equal(calls.length,1);assert.equal(calls[0].url,'/active/chat/completions');assert.equal(calls[0].auth,'Bearer fixture-active');
+ await click('重新测试');await wait(()=>ev('(async()=>{const s=await window.mc.getSettings();return s.vision.additional[0].verification?.lastTestOk===true})()'));assert.equal(calls.length,2);assert.match(await ev('document.querySelector(".health-panel").innerText'),/已返回文本，请核对译文/);
+ const memo=await ev(`window.mc.memoUpdate({memo:'',question:'q',answer:'a'})`);assert.ok(memo);assert.equal(calls.length,3);assert.equal(calls[2].url,'/active/chat/completions');assert.equal(calls[2].body.max_tokens,700);
+ const shot=await ev(`new Promise(resolve=>{const off=window.mc.onLlmEvent(e=>{if(e.requestId==='fixture-shot'&&(e.kind==='done'||e.kind==='error')){off();resolve(e);}});window.mc.shotAsk({requestId:'fixture-shot',question:'diagram',imageDataUrl:'data:image/png;base64,AAA',visionSlot:'vision-2',workspace:'interview',answerLang:'chinese'});})`);assert.equal(shot.kind,'done');assert.match(calls[3].body.messages[0].content,/用【中文】输出/);
+ await cmd('Emulation.setDeviceMetricsOverride',{width:640,height:700,deviceScaleFactor:1,mobile:false});await sleep(150);
+ const shotData=await cmd('Page.captureScreenshot');fs.writeFileSync(path.join(dir,'preflight.png'),Buffer.from(shotData.data,'base64'));
+ assert.equal(await ev('document.querySelector(".health-panel").scrollWidth <= document.querySelector(".health-panel").clientWidth'),true,'preflight horizontal fit');
+ await ev(`window.mc.setSettings({vision:{additional:[{model:'hang'}]}})`);
+ await cmd('Page.reload');await sleep(700);await wait(()=>ev('!!document.querySelector(".workspace-tabs")'));await click('会前检查');
+ assert.match(await ev('document.querySelector(".health-panel").innerText'),/实际翻译尚未验证通过/);
+
+ const hang=ev(`window.mc.translate('cancel sample').then(()=>({ok:true}),()=>({cancelled:true}))`);await wait(()=>calls.some(x=>x.body.model==='hang'));await ev('window.mc.stopAllAnswers()');assert.deepEqual(await hang,{cancelled:true});
+ await ev(`window.mc.setSettings({vision:{additional:[{interviewEnabled:false},{interviewEnabled:false}]}})`);
+ const noService=await ev(`window.mc.translate('no service').then(()=>'',e=>e.message)`);assert.match(noService,/No enabled interview service/);
+ assert.equal(calls.filter(c=>c.url.startsWith('/old')).length,0,'never use broken old text service in interview mode');
+
+ // Exercise additional public IPC paths against the same isolated mock service.
+ await ev(`window.mc.setSettings(${JSON.stringify(patch)})`);
+ const ask = async payload => ev(`new Promise(resolve=>{const p=${JSON.stringify(payload)};const off=window.mc.onLlmEvent(e=>{if(e.requestId===p.requestId&&(e.kind==='done'||e.kind==='error')){off();resolve(e);}});window.mc.llmAsk(p);})`);
+ const beforeLegacy=calls.length;
+ const legacy=await ask({requestId:'legacy-translation',mode:'translate',question:'hello',recentTranscript:[],visionSlot:'vision-3'});
+ assert.equal(legacy.kind,'done');assert.equal(calls.length,beforeLegacy+1);assert.equal(calls.at(-1).url,'/active/chat/completions');
+ const screen=async payload=>ev(`new Promise(resolve=>{const p=${JSON.stringify(payload)};const off=window.mc.onLlmEvent(e=>{if(e.requestId===p.requestId&&(e.kind==='done'||e.kind==='error')){off();resolve(e);}});window.mc.shotAsk(p);})`);
+ const legacyShot=await screen({requestId:'legacy-shot',question:'legacy image',imageDataUrl:'data:image/png;base64,BBB',visionSlot:'vision-2',workspace:'interview'});
+ assert.equal(legacyShot.kind,'done');assert.match(calls.at(-1).body.messages[0].content,/用【英文】输出/);
+ const written=await screen({requestId:'written-shot',question:'written image',imageDataUrl:'data:image/png;base64,CCC',visionSlot:'vision-2',workspace:'written',answerLang:'english'});
+ assert.equal(written.kind,'done');assert.match(calls.at(-1).body.messages[0].content,/用中文输出/);assert.doesNotMatch(calls.at(-1).body.messages[0].content,/用【英文】输出/);
+ await ev(`window.mc.setSettings({vision:{additional:[{model:'hang'}]}})`);
+ const beforeCancel=calls.length;
+ const cancelledMemo=ev(`window.mc.memoUpdate({memo:'old memo',question:'question',answer:'answer'}).then(text=>({text}))`);
+ await wait(()=>calls.length>beforeCancel);await ev('window.mc.stopAllAnswers()');assert.deepEqual(await cancelledMemo,{text:''});
+ await ev(`window.mc.setSettings({llm:{answerWithVision:false,baseUrl:'http://127.0.0.1:${port}/text',model:'text',apiKey:'fixture-text'}})`);
+ assert.ok(await ev(`window.mc.translate('text mode sample')`));assert.equal(calls.at(-1).url,'/text/chat/completions');assert.equal(calls.at(-1).auth,'Bearer fixture-text');
+ assert.ok(await ev(`window.mc.memoUpdate({memo:'',question:'q',answer:'a'})`));assert.equal(calls.at(-1).url,'/text/chat/completions');assert.equal(calls.at(-1).body.max_tokens,700);
+ console.log(JSON.stringify({ok:true,profile:dir,requests:calls.length,checks:['no automatic request','active slot, language and material UI','real translation check','separate connection test retains translation verdict','memo selected account and limits','explicit screenshot language','640px layout','changed service invalidates translation verdict','stop cancels translation','no enabled service fails clearly','legacy translation selects first service','old screenshot defaults to configured English','written screenshot retains Chinese','stop cancels memo without replacing old memo','text mode translation and memo keep text credentials']}));
+ }finally{ws?.close();if(child?.pid)try{execFileSync('taskkill',['/pid',String(child.pid),'/T','/F'],{stdio:'ignore'});}catch{}server.closeAllConnections();server.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -1,0 +1,45 @@
+/**
+ * Accumulates 16 kHz mono input into 1600-sample (100 ms) Float32 frames and
+ * posts them to the main thread. Runs on the audio rendering thread — keep it
+ * allocation-light.
+ */
+class PcmWorklet extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Float32Array(1600);
+    this.n = 0;
+    this.stopped = false;
+    this.port.onmessage = ({ data }) => {
+      if (data !== 'flush' || this.stopped) return;
+      this.stopped = true;
+      if (this.n) {
+        const tail = this.buf.slice(0, this.n);
+        this.port.postMessage(tail.buffer, [tail.buffer]);
+      }
+      this.port.postMessage('flushed');
+    };
+  }
+
+  process(inputs) {
+    if (this.stopped) return false;
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) {
+      let i = 0;
+      while (i < ch.length) {
+        const take = Math.min(ch.length - i, this.buf.length - this.n);
+        this.buf.set(ch.subarray(i, i + take), this.n);
+        this.n += take;
+        i += take;
+        if (this.n === this.buf.length) {
+          const out = this.buf;
+          this.port.postMessage(out.buffer, [out.buffer]);
+          this.buf = new Float32Array(1600);
+          this.n = 0;
+        }
+      }
+    }
+    return true;
+  }
+}
+
+registerProcessor('pcm-worklet', PcmWorklet);

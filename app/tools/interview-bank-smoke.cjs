@@ -1,0 +1,213 @@
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const {spawn,execFileSync} = require('child_process');
+const appRoot = path.resolve(__dirname,'..');
+const electron = process.env.MC_TEST_EXE || require(path.join(appRoot,'node_modules/electron'));
+const WebSocket = require(path.join(appRoot,'node_modules/ws'));
+const assert = require('assert/strict');
+const workDir = path.join(appRoot,'..','work');
+fs.mkdirSync(workDir,{recursive:true});
+const dir = fs.mkdtempSync(path.join(workDir,'bank-profile-'));
+const legacyText = 'OLD_GLOBAL_RESUME_NOT_IN_SESSION';
+fs.writeFileSync(path.join(dir, 'knowledge.md'), legacyText);
+fs.writeFileSync(path.join(dir,'settings.json'), JSON.stringify({version:2,onboarding:{schemaVersion:1,completed:true},ui:{workspace:'interview',stealth:false,lang:'zh'},asr:{backend:'cloud-realtime',realtime:{baseUrl:'wss://example.invalid/asr',model:'fixture'}}}));
+const source={id:'source',name:'Source interview',createdAt:0,resumeName:'cv.md',resumeText:'I built a prototype. My old notes claim expert Python.',jdName:'company.md',jdText:'Position not confirmed. Company requires expert Python.',
+ turns:[{id:'old-answer',kind:'free',label:'OLD_PRIVATE_QUESTION',text:'OLD_PRIVATE_AI',status:'done'}],segments:[{id:1,text:'OLD_PRIVATE_SPEECH',speaker:'me',startTs:0,endTs:100}],memo:'OLD_PRIVATE_MEMO',
+ scripts:[{id:'old-script',title:'Original script',text:'My confirmed introduction.',collapsed:true}],personalInfo:{education:{confirmed:'CS student',pending:''},skills:{confirmed:'Expert Python in old notes',pending:'Verify level'},availability:{confirmed:'Next week',pending:'Exact date'}}};
+fs.writeFileSync(path.join(dir,'sessions.json'),JSON.stringify({currentId:'empty',sessions:[{id:'empty',name:'Empty',createdAt:1,turns:[],segments:[{id:1,text:'Delay the synthetic translation',startTs:0,endTs:100}]},source,{id:'legacy',name:'Legacy KB',createdAt:2,turns:[],kbName:'legacy.md',kbText:'Legacy resume text'}]}));
+let releaseTranslation;
+let child,ws,mainWs,mainSeq=0,seq=0;const pending=new Map(), calls=[];
+const server=http.createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;const body=JSON.parse(raw);calls.push({body});
+ const sys=body.messages[0].content;
+ if(body.messages.at(-1).content.includes('Hang preparation')) return;
+
+ if(sys.includes('判断当前面试问题')) { if(body.messages[1].content.includes('timeout'))return; res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({match:body.messages[1].content.includes('walk me through')?1:0})}}]}));return; }
+ const last=body.messages.at(-1).content;
+ if(last.includes('Delay the synthetic translation')) await new Promise(resolve => { releaseTranslation = resolve; });
+ const text=sys.includes('翻译引擎')?'我会编程。':last.includes('missing translation fixture')?'I can code.':sys.includes('备忘维护器')?'Memo fixture':'I evaluate retrieval with a held-out test set.\n\n中文翻译：\n我使用独立测试集评估检索效果。\n中文备注：不应显示。';
+ res.setHeader('Content-Type','application/json');
+ if(body.stream){res.setHeader('Content-Type','text/event-stream');res.end('data: '+JSON.stringify({choices:[{delta:{content:text}}]})+'\n\ndata: [DONE]\n\n');return;}
+ res.end(JSON.stringify({choices:[{message:{content:text}}]}));});
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const wait=async fn=>{for(let i=0;i<100;i++){const value=await fn();if(value)return value;await sleep(100);}throw Error('Timed out');};
+const cmd=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq;pending.set(id,{resolve,reject});ws.send(JSON.stringify({id,method,params}));});
+const ev=async expression=>{const r=await cmd('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;};
+const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].find(x=>x.checkVisibility()&&x.textContent.includes(${JSON.stringify(label)}));if(!b)throw Error('button missing');b.click();return true;})()`);
+(async()=>{try{
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;
+ const debugServer=http.createServer();await new Promise(r=>debugServer.listen(0,'127.0.0.1',r));const debugPort=debugServer.address().port;await new Promise(r=>debugServer.close(r));
+ const inspector=http.createServer();await new Promise(r=>inspector.listen(0,'127.0.0.1',r));const nodePort=inspector.address().port;await new Promise(r=>inspector.close(r));
+ child=spawn(electron,[...(process.env.MC_TEST_EXE?[]:[appRoot]),`--remote-debugging-port=${debugPort}`,`--inspect=127.0.0.1:${nodePort}`],{cwd:appRoot,env:{...process.env,MC_USERDATA:dir},stdio:['ignore','pipe','pipe'],windowsHide:true});
+ let logs='';child.stdout.on('data',x=>logs+=x);child.stderr.on('data',x=>logs+=x);
+ const tab=await wait(async()=>{try{return (await(await fetch(`http://127.0.0.1:${debugPort}/json`)).json()).find(x=>x.type==='page'&&x.url.includes('index.html'));}catch{return null;}});
+ ws=new WebSocket(tab.webSocketDebuggerUrl);await new Promise(r=>ws.once('open',r));ws.on('message',raw=>{const r=JSON.parse(raw);if(r.id&&pending.has(r.id)){const p=pending.get(r.id);pending.delete(r.id);r.error?p.reject(Error(JSON.stringify(r.error))):p.resolve(r.result);}});
+ await wait(()=>ev('!!window.mc && !!document.querySelector(".workspace-tabs")'));
+ const patch={llm:{baseUrl:`http://127.0.0.1:${port}/old`,model:'old',apiKey:'fixture-old',answerWithVision:true,answerLang:'english'},vision:{baseUrl:`http://127.0.0.1:${port}/disabled`,model:'disabled',apiKey:'fixture-disabled',interviewEnabled:false,additional:[{baseUrl:`http://127.0.0.1:${port}/active`,model:'active',apiKey:'fixture-active',interviewEnabled:true},{baseUrl:`http://127.0.0.1:${port}/second`,model:'second',apiKey:'fixture-second',interviewEnabled:true}]}};
+ await ev(`window.mc.setSettings(${JSON.stringify(patch)})`);await cmd('Page.reload');await sleep(700);await wait(()=>ev('!!document.querySelector(".workspace-tabs")'));
+
+
+ const setValue=(selector,value)=>ev(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});Object.getOwnPropertyDescriptor(el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:el.tagName==='SELECT'?HTMLSelectElement.prototype:HTMLInputElement.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}));})()`);
+ const current=()=>ev('document.querySelector(".session-select").value');
+ const read=()=>ev('window.mc.loadSessions()');
+ const create=async()=>{const old=await current();await ev(`document.querySelector('.session-bar > button').click()`);await wait(async()=>await current()!==old);const id=await current();await wait(async()=>(await read()).sessions.some(s=>s.id===id));return (await read()).sessions.find(s=>s.id===id);};
+
+ // Both sessions have segment 1. Finish the translation after switching to the other session.
+ await ev('document.querySelector(".bubble-btns button").click()');
+ await wait(() => releaseTranslation);
+ await setValue('.session-bar select', 'source');
+ await wait(() => ev('document.querySelector(".bubble-text")?.textContent === "OLD_PRIVATE_SPEECH"'));
+ releaseTranslation();
+ await wait(async () => (await read()).sessions.some(s => s.segments?.[0]?.translation));
+ const translated = await read();
+ assert.equal(translated.sessions.find(s => s.id === 'empty').segments[0].translating, false, 'origin must finish');
+ assert.equal(translated.sessions.find(s => s.id === 'empty').segments[0].translation, '我会编程。');
+ assert.equal(translated.sessions.find(s => s.id === 'source').segments[0].translation, undefined, 'other session must stay untouched');
+ calls.length = 0;
+ const seeded=await ev('window.mc.getLibrary()');assert.equal(Object.keys(seeded.answers).length,0);
+ const session=await create();
+ await click('面试资料');await setValue('[data-library=resume]','BANK_CV a retrieval project');await setValue('[data-library=jd]','BANK_JD retrieval role');await setValue('[data-library=questions]','如何评估检索？ / How do you evaluate retrieval?\nWhat is a held-out test set?');
+ // An unwritable session file must keep the dialog open and allow the same save to be retried.
+ const blockedTemp=path.join(dir,'sessions.json.tmp');fs.mkdirSync(blockedTemp);
+ try {
+   await click('保存并用于本场');
+   await wait(()=>ev('!!document.querySelector(".library-panel [role=status]") && !document.querySelector(".library-panel .btn-primary").disabled'));
+   assert.ok(await ev('document.querySelector(".library-panel [role=status]").innerText.trim()'));
+   assert.equal((await ev('window.mc.getLibrary()')).resumeText, seeded.resumeText);
+ } finally {fs.rmdirSync(blockedTemp);}
+ await click('保存并用于本场');await wait(()=>ev('!document.querySelector(".library-panel")'));
+ await cmd('Page.reload');await sleep(700);assert.equal((await read()).sessions.find(s=>s.id===session.id).resumeText,'BANK_CV a retrieval project');
+ await click('面试资料');await click('题库');assert.equal(await ev('[...document.querySelectorAll(".library-panel button")].some(b=>b.textContent.includes("选用"))'),false);
+ await click('准备全部答案');await wait(()=>ev('document.querySelector(".library-panel").innerText.includes("已准备 2 道")'));
+ const prepared=await ev('window.mc.getLibrary()');assert.equal(Object.keys(prepared.answers).length,2);assert.match(Object.values(prepared.answers)[0].english,/held-out/);assert.match(Object.values(prepared.answers)[0].chinese,/测试集/);assert.ok(calls.every(c=>c.body.messages[0].content.includes('完整简体中文翻译')));
+ await ev('document.querySelector(".bank-entry").open=true');await setValue('[data-bank-english]','I evaluate retrieval using a held-out set.');await click('保存并用于本场');await wait(()=>ev('!document.querySelector(".library-panel")'));
+ assert.match((await ev('window.mc.getLibrary()')).answers[prepared.questions[0]].english,/using/);await wait(async()=>(await read()).sessions.find(s=>s.id===session.id)?.resumeText==='BANK_CV a retrieval project');
+ await cmd('Page.reload');await sleep(700);await wait(()=>ev('!!document.querySelector("#current-interview-question")'));
+ const material={resume:'BANK_CV a retrieval project',jd:'BANK_JD retrieval role'};
+ const ask=async(question,extra={})=>ev(`new Promise(resolve=>{const id='bank-test-'+Date.now();const off=window.mc.onLlmEvent(e=>{if(e.requestId===id&&['done','error','cancelled'].includes(e.kind)){off();resolve(e);}});window.mc.llmAsk({requestId:id,mode:'segment',question:${JSON.stringify(question)},answerLang:'english',recentTranscript:[],visionSlot:'vision-2',...${JSON.stringify(material)},...${JSON.stringify(extra)}});})`);
+ let before=calls.length;const exact=await ask('How do you evaluate retrieval?');assert.equal(calls.length,before);assert.ok(exact.bankQuestion);assert.match(exact.text,/I evaluate retrieval using/);assert.match(exact.text,/中文翻译：/);assert.doesNotMatch(exact.text,/中文备注/);
+ const chinese=await ask('如何评估检索？',{answerLang:'chinese'});assert.equal(calls.length,before);assert.equal(chinese.text,'我使用独立测试集评估检索效果。');
+ const semantic=await ask('Could you walk me through the retrieval evaluation approach?');assert.ok(semantic.bankQuestion);assert.equal(calls.length,before+1);assert.ok(calls.at(-1).body.messages[0].content.includes('判断当前面试问题'));
+ before=calls.length;const miss=await ask('How do you train a classifier?');assert.equal(miss.bankQuestion,undefined);assert.equal(calls.length,before+2);assert.match(calls.at(-1).body.messages[0].content,/完整简体中文翻译/);
+ before=calls.length;await ask('How do you evaluate retrieval?',{resume:'DIFFERENT_CV'});assert.equal(calls.length,before+1);assert.ok(!calls.at(-1).body.messages[0].content.includes('判断当前面试问题'));
+ const fixed=await ask('missing translation fixture?',{resume:'DIFFERENT_CV'});assert.equal(fixed.text,'I can code.\n\n中文翻译：\n我会编程。');assert.doesNotMatch(miss.text,/中文备注/);
+ const screenshot='data:image/png;base64,'+fs.readFileSync(path.join(appRoot,'resources','test-image.png')).toString('base64');
+ const shot=await ev(`new Promise(resolve=>{const id='bank-shot';const off=window.mc.onLlmEvent(e=>{if(e.requestId===id&&['done','error'].includes(e.kind)){off();resolve(e);}});window.mc.shotAsk({requestId:id,sessionId:'shot-fixture',question:'Describe the image?',imageDataUrl:${JSON.stringify(screenshot)},workspace:'interview',visionSlot:'vision-2',answerLang:'english'});})`);
+ assert.equal(shot.kind,'done');assert.match(shot.text,/中文翻译：/);assert.doesNotMatch(shot.text,/中文备注/);
+ const screenshotPrompt = JSON.stringify(calls.at(-1).body.messages);
+ const pendingAsk=ask('What is a timeout question?');await wait(()=>calls.at(-1).body.messages[0].content.includes('判断当前面试问题'));await ev('window.mc.stopAllAnswers()');assert.equal((await pendingAsk).kind,'cancelled');
+ const mainTarget=await wait(async()=>{try{return (await(await fetch(`http://127.0.0.1:${nodePort}/json`)).json())[0];}catch{return null;}});
+ mainWs=new WebSocket(mainTarget.webSocketDebuggerUrl);await new Promise(r=>mainWs.once('open',r));
+ const mainEval=expression=>new Promise((resolve,reject)=>{const id=++mainSeq;const handle=raw=>{const msg=JSON.parse(raw);if(msg.id!==id)return;mainWs.off('message',handle);if(msg.result?.exceptionDetails)reject(Error(JSON.stringify(msg.result.exceptionDetails)));else resolve(msg.result);};mainWs.on('message',handle);mainWs.send(JSON.stringify({id,method:'Runtime.evaluate',params:{expression,returnByValue:true}}));});
+ const time=Date.now()-10000;const event={kind:'segment',id:time,text:'Next question, how do you evaluate retrieval?',speaker:'them',lang:'en',timings:{speechStartTs:time,speechEndTs:time+2000,inferStartTs:time+2000,inferEndTs:time+2100}};
+ const emit=(asr=event)=>mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify(asr)})`);
+ await click('持续答');before=calls.length;await emit();await wait(()=>ev('document.querySelectorAll(".session .turn").length===1'));
+ await wait(()=>ev('document.querySelector(".session .turn").innerText.includes("中文翻译：")'));await sleep(500);assert.equal(calls.length,before,'exact ASR reuse sends neither answer nor memo API requests');
+ assert.match(await ev('document.querySelector(".session .turn").innerText'),/Saved answer/);assert.equal(await ev('document.querySelector(".current-question").open'),false);
+ await emit();await sleep(1800);assert.equal(await ev('document.querySelectorAll(".session .turn").length'),1);
+ await wait(async()=>(await read()).sessions.find(s=>s.id===session.id).turns.length===1);assert.ok((await read()).sessions.find(s=>s.id===session.id).turns[0].bankQuestion);
+ const timings = {};
+ for (const [route, question, count] of [['exact','Next question, how do you evaluate retrieval?',1],['paraphrase','Next question, could you walk me through the retrieval evaluation approach?',1],['new','Next question, how do you train a classifier?',2]]) {
+   const oldCount = await ev('document.querySelectorAll(".session .turn").length');
+   const start = Date.now();
+   const slice = calls.length;
+   await emit({...event, id:start, text:question, timings:{...event.timings,speechStartTs:start-2000,speechEndTs:start,inferStartTs:start,inferEndTs:start}});
+   await wait(()=>ev(`[...document.querySelectorAll('.session .turn-body')].slice(${oldCount}).some(el=>el.innerText.includes('I evaluate'))`));
+   timings[route]=Date.now()-start;
+   await wait(async()=>(await read()).sessions.find(s=>s.id===session.id).turns.slice(oldCount).filter(t=>t.status==='done').length===count);
+   const batch=calls.slice(slice).filter(c=>!c.body.messages[0].content.includes('备忘维护器'));
+   assert.equal(batch.filter(c=>c.body.messages[0].content.includes('判断当前面试问题')).length,route==='exact'?0:1);
+   assert.equal(batch.filter(c=>!c.body.messages[0].content.includes('判断当前面试问题')).length,route==='new'?2:0);
+   assert.equal(await ev('document.querySelectorAll(".session .turn").length'),oldCount+count);
+ }
+ console.log('Mock ASR final to visible English (ms)',JSON.stringify(timings));
+ await cmd('Emulation.setDeviceMetricsOverride',{width:1000,height:750,deviceScaleFactor:1,mobile:false});await ev('document.documentElement.dataset.theme="light"');let img=await cmd('Page.captureScreenshot');fs.writeFileSync(path.join(dir,'bilingual-auto-answer.png'),Buffer.from(img.data,'base64'));
+ await click('面试资料');await click('题库');await cmd('Emulation.setDeviceMetricsOverride',{width:640,height:700,deviceScaleFactor:1,mobile:false});await sleep(100);img=await cmd('Page.captureScreenshot');fs.writeFileSync(path.join(dir,'automatic-bank.png'),Buffer.from(img.data,'base64'));assert.equal(await ev('document.querySelector(".library-panel").scrollWidth<=document.querySelector(".library-panel").clientWidth'),true);
+ await setValue('[data-library=questions]',prepared.questions.join('\n')+'\nHang preparation?');await click('准备全部答案');await wait(()=>ev('document.querySelector(".library-panel").innerText.includes("正在准备 3 / 3")'));await click('停止准备');await wait(()=>ev('!document.querySelector("[data-library=questions]").disabled'));assert.equal(Object.keys((await ev('window.mc.getLibrary()')).answers).length,2);
+ // Open the same question in another role, then reopen the older snapshot.
+ await click('关闭');
+ const secondRole = await create();
+ await click('面试资料');
+ await setValue('[data-library=resume]', 'Synthetic resume B');
+ await setValue('[data-library=jd]', 'Synthetic job B');
+ await click('题库');
+ assert.equal(await ev('document.querySelector("[data-bank-english]").value'), '');
+ await ev('document.querySelector(".bank-entry").open = true');
+ await setValue('[data-bank-english]', 'I prepared this answer for role B.');
+ await setValue('[data-bank-chinese]', '这是乙岗位的答案。');
+ await click('保存并用于本场');
+ await wait(() => ev('!document.querySelector(".library-panel")'));
+ await setValue('.session-bar select', session.id);
+ await click('面试资料');
+ assert.equal(await ev('document.querySelector("[data-library=resume]").value'), material.resume);
+ assert.equal(await ev('document.querySelector("[data-library=jd]").value'), material.jd);
+ await click('题库');
+ assert.match(await ev('document.querySelector("[data-bank-english]").value'), /using a held-out set/);
+ await click('保存并用于本场');
+ await wait(() => ev('!document.querySelector(".library-panel")'));
+ assert.equal((await ev('window.mc.getLibrary()')).resumeText, 'Synthetic resume B');
+ const restoredB = (await read()).sessions.find(s => s.id === secondRole.id);
+ assert.equal(restoredB.jdText, 'Synthetic job B');
+ assert.equal((await ask('How do you evaluate retrieval?', {resume:restoredB.resumeText,jd:restoredB.jdText})).text.split('\n')[0], 'I prepared this answer for role B.');
+ // A completed answer survives stopping and closing, while the draft resume stays private to the dialog.
+ await setValue('.session-bar select', secondRole.id);
+ await click('面试资料');
+ const draftResume = 'Draft resume for a future role';
+ const draftQuestion = 'What did you learn from the prototype?';
+ await setValue('[data-library=resume]', draftResume);
+ await setValue('[data-library=questions]', draftQuestion + '\nHang preparation?');
+ await click('题库');
+ await click('准备全部答案');
+ await wait(() => ev('document.querySelector(".library-panel").innerText.includes("正在准备 2 / 2")'));
+ await click('停止准备');
+ await wait(() => ev('!document.querySelector("[data-library=questions]").disabled'));
+ await click('关闭');
+ await cmd('Page.reload');
+ await wait(() => ev('!!document.querySelector("#current-interview-question")'));
+ const afterStop = await ev('window.mc.getLibrary()');
+ assert.ok(afterStop.answers[draftQuestion]);
+ assert.equal(afterStop.resumeText, restoredB.resumeText, 'preparing must preserve the published default');
+ assert.equal((await read()).sessions.find(s => s.id === secondRole.id).resumeText, restoredB.resumeText);
+ const beforeApply = await create();
+ assert.equal(beforeApply.resumeText, restoredB.resumeText);
+ await setValue('.session-bar select', secondRole.id);
+ await click('面试资料');
+ await setValue('[data-library=resume]', draftResume);
+ await click('题库');
+ assert.match(await ev('document.querySelector("[data-bank-english]").value'), /held-out/);
+ await click('保存并用于本场');
+ await wait(() => ev('!document.querySelector(".library-panel")'));
+ assert.equal((await create()).resumeText, draftResume);
+ assert.equal((await read()).sessions.find(s => s.id === beforeApply.id).resumeText, restoredB.resumeText);
+
+ // An existing empty session prepares, then matches the same answer despite a different default and knowledge.md.
+ await setValue('.session-bar select', 'empty');
+ await click('面试资料');
+ assert.equal(await ev('document.querySelector("[data-library=resume]").value'), '');
+ await setValue('[data-library=questions]', draftQuestion);
+ await click('题库');
+ before = calls.length;
+ await click('准备全部答案');
+ await wait(() => ev('document.querySelector(".library-panel").innerText.includes("已准备 1 道")'));
+ assert.equal(calls.length, before + 1);
+ const preparedPrefix = calls[before].body.messages[0].content;
+ const preparation = JSON.stringify(calls[before].body.messages);
+ for (const otherResume of [draftResume, restoredB.resumeText, legacyText]) assert.ok(!preparation.includes(otherResume));
+ await click('关闭');
+ before = calls.length;
+ await setValue('#current-interview-question', draftQuestion);
+ await click('生成回答');
+ await wait(async () => (await read()).sessions.find(s => s.id === 'empty').turns.some(t => t.bankQuestion === draftQuestion && t.status === 'done'));
+ assert.equal(calls.length, before, 'an empty session should match its prepared answer locally');
+ assert.equal((await ask('Could you walk me through the prototype lesson?', {resume:'', jd:''})).bankQuestion, draftQuestion);
+ assert.ok(!screenshotPrompt.includes(legacyText), 'empty screenshot must not use old global material');
+ await ev('window.mc.setSettings({llm:{answerWithVision:false}})');
+ before = calls.length;
+ await ev('window.mc.prewarm({immediate:true})');
+ await wait(() => calls.slice(before).some(c => c.body.max_tokens === 1));
+ const prewarm = calls.slice(before).find(c => c.body.max_tokens === 1).body.messages[0].content;
+ assert.equal(prewarm, preparedPrefix, 'empty-session prewarm must use the same material as preparation');
+ console.log(JSON.stringify({ok:true,profile:dir,checks:['cross-session delayed translation','same-question role variants','historical resume and JD editor snapshots','immediate reload keeps applied resume','write failure and retry','two-model cache coalescing','one semantic lookup per batch','missing translation repaired','extra notes removed','legacy question migration','no manual selection','prepare all bilingual answers','manual editing and reload persistence','exact reuse without API','Chinese cached answer','paraphrase verification','unknown fallback','stale material fallback','cancellation','continuous ASR auto reuse','duplicate ASR suppressed','saved source marker','640px UI','preparation stop keeps completed answers']}));
+
+ }finally{mainWs?.close();ws?.close();if(child?.pid)try{execFileSync('taskkill',['/pid',String(child.pid),'/T','/F'],{stdio:'ignore'});}catch{}server.closeAllConnections();server.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

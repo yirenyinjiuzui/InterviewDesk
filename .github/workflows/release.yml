@@ -1,0 +1,98 @@
+name: Windows portable release
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check version and compile capture helper
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $version -ne (Get-Content app/package.json -Raw | ConvertFrom-Json).version) { throw 'Version mismatch' }
+          if (!(Test-Path "docs/releases/$version.md")) { throw 'Missing release notes' }
+          .\build.cmd
+      - name: Install locked dependencies
+        working-directory: app
+        run: npm ci
+      - name: Typecheck, test and build
+        working-directory: app
+        run: npm run verify
+      - name: Test Python helpers
+        working-directory: app
+        run: npm run test:python
+      - name: Verify dependency patch
+        working-directory: app
+        run: npm run verify:patched
+      - name: Package portable x64
+        working-directory: app
+        run: npx --no-install electron-builder --win portable --x64 --publish never
+      - name: Verify packaged resources
+        working-directory: app
+        run: node tools/check-release-files.cjs
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $name = 'InterviewDesk-' + (Get-Content VERSION -Raw).Trim() + '-win-x64-portable.exe'
+          $hash = (Get-FileHash "app/release/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content app/release/SHA256SUMS.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable
+          path: |
+            app/release/InterviewDesk-*-win-x64-portable.exe
+            app/release/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable
+          path: portable
+      - name: Publish verified assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(tr -d '\r\n' < VERSION)
+          tag="v$version"
+          (cd portable && sha256sum -c SHA256SUMS.txt)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true
+            test "$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --title "InterviewDesk $tag" --notes-file "docs/releases/$version.md" --draft
+          fi
+          gh release upload "$tag" "portable/InterviewDesk-$version-win-x64-portable.exe" portable/SHA256SUMS.txt --clobber
+          gh release edit "$tag" --draft=false --latest
