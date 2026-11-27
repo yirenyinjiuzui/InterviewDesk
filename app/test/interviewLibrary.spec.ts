@@ -90,3 +90,34 @@ it('restores both job-specific answers after preparing the same question for a s
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+it('preparing a reduced draft preserves the other role and its saved question across reopen', () => {
+  const { root, dir } = folder();
+  const file = join(dir, 'draft-roles.sqlite');
+  const shared = 'Why this role?', remaining = 'Describe your prototype?';
+  const answer = (role: string) => ({ english: 'I prepared for ' + role, chinese: '这是该岗位的答案。', materialKey: bankMaterialKey('Synthetic CV', role) });
+  let store = new InterviewLibraryStore(file);
+  try {
+    store.save({ questions: [shared, remaining], answers: { [shared]: answer('Role A') } });
+    store.save({ questions: [shared, remaining], answers: { [shared]: answer('Role B') } });
+    // B removes the shared question only from the draft, then prepares the remaining one.
+    store.save({ mode: 'prepare', questions: [remaining], answers: { [remaining]: answer('Role B') } });
+    store.close();
+    store = new InterviewLibraryStore(file);
+    expect(store.get().questions).toEqual([shared, remaining]);
+    expect(matchBankAnswer(shared, store.get(), answer('Role A').materialKey)?.answer).toEqual(answer('Role A'));
+    expect(matchBankAnswer(shared, store.get(), answer('Role B').materialKey)?.answer).toEqual(answer('Role B'));
+    expect(matchBankAnswer(remaining, store.get(), answer('Role B').materialKey)?.answer).toEqual(answer('Role B'));
+    expect(matchBankAnswer(shared, store.get(), answer('Role C').materialKey)).toBeUndefined();
+    // A newly prepared question is still added, while an explicit full save retains deletion semantics.
+    const added = 'A new question?';
+    store.save({ mode: 'prepare', questions: [added], answers: { [added]: answer('Role B') } });
+    expect(store.get().questions).toEqual([shared, remaining, added]);
+    store.save({ questions: [remaining, added], answers: store.get().answers });
+    expect(store.get().questions).toEqual([remaining, added]);
+  } finally {
+    store.close();
+    if (!resolve(dir).startsWith(root + sep)) throw Error('invalid path');
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

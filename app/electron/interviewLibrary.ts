@@ -43,12 +43,18 @@ export class InterviewLibraryStore {
   }
   save(value: InterviewLibraryUpdate): InterviewLibrary {
     if (!value || !Array.isArray(value.questions) || !value.questions.every((q) => typeof q === 'string')) throw new Error('Invalid interview library');
-    const profile = 'resumeName' in value ? value : undefined;
+    const preparing = 'mode' in value && value.mode === 'prepare';
+    const profile = !preparing && 'resumeName' in value ? value : undefined;
     if (profile && [profile.resumeName, profile.resumeText, profile.resumeSource].some((v) => typeof v !== 'string')) throw new Error('Invalid interview library');
     if (profile && [profile.jdName, profile.jdText, profile.jdSource].some((v) => v !== undefined && typeof v !== 'string')) throw new Error('Invalid job material');
-    const answers = value.answers ?? (this.db.prepare('SELECT id FROM profile WHERE id=1').get() ? this.get().answers : {}) ?? {};
-    if (Object.values(answers).some((a) => !a || typeof a.english !== 'string' || typeof a.chinese !== 'string' || typeof a.materialKey !== 'string')) throw new Error('Invalid bank answer');
-    const questions = [...new Set(value.questions.map((q) => q.trim()).filter(Boolean))];
+    const existing = this.db.prepare('SELECT id FROM profile WHERE id=1').get() ? this.get() : undefined;
+    const supplied = value.answers ?? (preparing ? {} : existing?.answers) ?? {};
+    if (Object.values(supplied).some((a) => !a || typeof a.english !== 'string' || typeof a.chinese !== 'string' || typeof a.materialKey !== 'string')) throw new Error('Invalid bank answer');
+    const requested = [...new Set(value.questions.map((q) => q.trim()).filter(Boolean))];
+    // Preparing an answer is a checkpoint, not confirmation of edits to the global question list.
+    const completed = preparing ? requested.filter((q) => Object.hasOwn(supplied, q)) : requested;
+    const questions = preparing ? [...new Set([...(existing?.questions ?? []), ...completed])] : requested;
+    const answers = preparing ? { ...existing?.answers, ...Object.fromEntries(completed.map((q) => [q, supplied[q]])) } : supplied;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (profile) this.db.prepare('INSERT OR REPLACE INTO profile (id, resume_name, resume_text, resume_source, jd_name, jd_text, jd_source) VALUES (1, ?, ?, ?, ?, ?, ?)').run(profile.resumeName, profile.resumeText, profile.resumeSource, profile.jdName ?? '', profile.jdText ?? '', profile.jdSource ?? '');
