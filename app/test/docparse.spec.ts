@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { DOC_EXTENSIONS, extractDocText, normalizeDocText } from '../electron/docparse';
@@ -25,6 +25,22 @@ describe('extractDocText (deterministic resume/JD parsing)', () => {
     const p = join(dir, 'kb.md');
     writeFileSync(p, '# 简历\n\n项目：MeetingCopilot', 'utf8');
     expect(await extractDocText(p)).toBe('# 简历\n\n项目：MeetingCopilot');
+  });
+
+  it('reads Windows Unicode text files with UTF-16 LE/BE BOMs and preserves bilingual content', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mc-doc-encoding-'));
+    try {
+      const expected = '# 简历 / Resume\n项目：Python 研究 🚀';
+      const text = expected.replace('\n', '\r\n') + '  \r\n';
+      const little = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]);
+      const big = Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(text, 'utf16le').swap16()]);
+      const utf8 = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text, 'utf8')]);
+      for (const [name, bytes] of [['resume.txt', little], ['role.txt', big], ['notes.md', utf8]] as const) {
+        const file = join(dir, name);
+        writeFileSync(file, bytes);
+        expect(await extractDocText(file)).toBe(expected);
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it('advertised extensions match parse support', () => {

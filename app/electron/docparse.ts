@@ -38,5 +38,10 @@ export async function extractDocText(filePath: string): Promise<string> {
       await parser.destroy();
     }
   }
-  return normalizeDocText(readFileSync(filePath, 'utf8'));
+  // Windows PowerShell and Notepad can save text as BOM-marked UTF-16.
+  // Decode the declared byte order before normalization; ordinary UTF-8 stays unchanged.
+  const bytes = readFileSync(filePath);
+  const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le'
+    : bytes[0] === 0xfe && bytes[1] === 0xff ? 'utf-16be' : 'utf-8';
+  return normalizeDocText(new TextDecoder(encoding).decode(bytes));
 }
