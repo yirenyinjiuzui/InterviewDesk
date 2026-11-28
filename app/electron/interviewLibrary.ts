@@ -51,7 +51,18 @@ export class InterviewLibraryStore {
     const questions = [...new Set(value.questions.map((q) => q.trim()).filter(Boolean))];
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      if (profile) this.db.prepare('INSERT OR REPLACE INTO profile (id, resume_name, resume_text, resume_source, jd_name, jd_text, jd_source) VALUES (1, ?, ?, ?, ?, ?, ?)').run(profile.resumeName, profile.resumeText, profile.resumeSource, profile.jdName ?? '', profile.jdText ?? '', profile.jdSource ?? '');
+      if (profile) {
+        const resumeOnly = [profile.jdName, profile.jdText, profile.jdSource].every((v) => v === undefined);
+        if (resumeOnly) {
+          // Older resume-only payloads omit all JD fields. Do not erase the
+          // separately importable legacy JD; an explicit empty JD still clears it.
+          this.db.prepare(`INSERT INTO profile (id, resume_name, resume_text, resume_source) VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET resume_name=excluded.resume_name, resume_text=excluded.resume_text, resume_source=excluded.resume_source`)
+            .run(profile.resumeName, profile.resumeText, profile.resumeSource);
+        } else {
+          this.db.prepare('INSERT OR REPLACE INTO profile (id, resume_name, resume_text, resume_source, jd_name, jd_text, jd_source) VALUES (1, ?, ?, ?, ?, ?, ?)').run(profile.resumeName, profile.resumeText, profile.resumeSource, profile.jdName ?? '', profile.jdText ?? '', profile.jdSource ?? '');
+        }
+      }
       // Archive the previous per-question slots before replacing them, including 0.3.17 data.
       this.db.exec("INSERT OR REPLACE INTO answer_history SELECT text, material_key, english, chinese FROM questions WHERE english <> '' OR chinese <> ''");
       this.db.exec('DELETE FROM questions');

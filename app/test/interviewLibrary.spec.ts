@@ -52,6 +52,29 @@ it('migrates an existing resume database without losing resume or questions and 
  } finally {store?.close();if(!resolve(dir).startsWith(root+sep))throw Error('invalid path');rmSync(dir,{recursive:true,force:true});}
 });
 
+it('preserves the legacy default JD when a resume-only client omits the optional JD fields', () => {
+  const { root, dir } = folder();
+  const file = join(dir, 'materials.sqlite');
+  let store = new InterviewLibraryStore(file);
+  try {
+    store.save({ ...store.get(), resumeName: 'Original CV', resumeText: 'Synthetic resume', resumeSource: 'manual',
+      jdName: 'Old role', jdText: 'Synthetic legacy role', jdSource: 'old-default', questions: ['Q?'] });
+    store.save({ resumeName: 'Updated CV', resumeText: 'Updated synthetic resume', resumeSource: 'manual', questions: ['Q?'] });
+    store.close();
+    store = new InterviewLibraryStore(file);
+    expect(store.get()).toMatchObject({ resumeName: 'Updated CV', resumeText: 'Updated synthetic resume',
+      jdName: 'Old role', jdText: 'Synthetic legacy role', jdSource: 'old-default', questions: ['Q?'] });
+    // The previous default remains opt-in, never automatically applied to a new interview.
+    expect(withDefaultResume(session('new', 2), store.get()).jdText).toBeUndefined();
+    store.save({ ...store.get(), jdName: '', jdText: '', jdSource: '' });
+    expect(store.get()).toMatchObject({ jdName: '', jdText: '', jdSource: '' });
+  } finally {
+    store.close();
+    if (!resolve(dir).startsWith(root + sep)) throw Error('invalid path');
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 it('retains prepared bilingual answers across migration, old-client saves and reopen, and prunes removed questions', () => {
  const {root,dir}=folder();let store: InterviewLibraryStore | undefined;
  try {
