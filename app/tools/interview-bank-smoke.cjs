@@ -100,7 +100,10 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  mainWs=new WebSocket(mainTarget.webSocketDebuggerUrl);await new Promise(r=>mainWs.once('open',r));
  const mainEval=expression=>new Promise((resolve,reject)=>{const id=++mainSeq;const handle=raw=>{const msg=JSON.parse(raw);if(msg.id!==id)return;mainWs.off('message',handle);if(msg.result?.exceptionDetails)reject(Error(JSON.stringify(msg.result.exceptionDetails)));else resolve(msg.result);};mainWs.on('message',handle);mainWs.send(JSON.stringify({id,method:'Runtime.evaluate',params:{expression,returnByValue:true}}));});
  const time=Date.now()-10000;const event={kind:'segment',id:time,text:'Next question, how do you evaluate retrieval?',speaker:'them',lang:'en',timings:{speechStartTs:time,speechEndTs:time+2000,inferStartTs:time+2000,inferEndTs:time+2100}};
- const emit=(asr=event)=>mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify(asr)})`);
+ const emit=async (asr=event)=>{
+   const sessionId=await ev('document.querySelector(".session-select").value');
+   return mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify({sessionId,...asr})})`);
+ };
  await click('持续答');before=calls.length;await emit();await wait(()=>ev('document.querySelectorAll(".session .turn").length===1'));
  await wait(()=>ev('document.querySelector(".session .turn").innerText.includes("中文翻译：")'));await sleep(500);assert.equal(calls.length,before,'exact ASR reuse sends neither answer nor memo API requests');
  assert.match(await ev('document.querySelector(".session .turn").innerText'),/Saved answer/);assert.equal(await ev('document.querySelector(".current-question").open'),false);
@@ -149,6 +152,17 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  const restoredB = (await read()).sessions.find(s => s.id === secondRole.id);
  assert.equal(restoredB.jdText, 'Synthetic job B');
  assert.equal((await ask('How do you evaluate retrieval?', {resume:restoredB.resumeText,jd:restoredB.jdText})).text.split('\n')[0], 'I prepared this answer for role B.');
+ // Preparing a reduced B draft must not publish its removal of A's saved question.
+ await setValue('.session-bar select', secondRole.id);
+ await click('面试资料');await click('题库');
+ await setValue('[data-library=questions]', prepared.questions[1]);
+ await click('准备全部答案');
+ await wait(() => ev('document.querySelector(".library-panel").innerText.includes("已准备 1 道")'));
+ await click('关闭');
+ await setValue('.session-bar select', session.id);
+ await click('面试资料');await click('题库');
+ assert.match(await ev('document.querySelector("[data-bank-english]").value'), /using a held-out set/);
+ await click('关闭');
  // A completed answer survives stopping and closing, while the draft resume stays private to the dialog.
  await setValue('.session-bar select', secondRole.id);
  await click('面试资料');
@@ -166,6 +180,15 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  await wait(() => ev('!!document.querySelector("#current-interview-question")'));
  const afterStop = await ev('window.mc.getLibrary()');
  assert.ok(afterStop.answers[draftQuestion]);
+ assert.ok(afterStop.questions.includes(prepared.questions[0]), 'preparing a reduced draft must not remove an already saved question');
+ await setValue('.session-bar select', session.id);
+ await click('面试资料');await click('题库');
+ assert.match(await ev('document.querySelector("[data-bank-english]").value'), /using a held-out set/, 'role A answer survives preparation in B');
+ await click('关闭');
+ await setValue('.session-bar select', secondRole.id);
+ await click('面试资料');await click('题库');
+ assert.equal(await ev('document.querySelector("[data-bank-english]").value'), 'I prepared this answer for role B.');
+ await click('关闭');
  assert.equal(afterStop.resumeText, restoredB.resumeText, 'preparing must preserve the published default');
  assert.equal((await read()).sessions.find(s => s.id === secondRole.id).resumeText, restoredB.resumeText);
  const beforeApply = await create();
@@ -174,7 +197,7 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  await click('面试资料');
  await setValue('[data-library=resume]', draftResume);
  await click('题库');
- assert.match(await ev('document.querySelector("[data-bank-english]").value'), /held-out/);
+ assert.match(await ev(`[...document.querySelectorAll("[data-bank-english]")].find(el => el.dataset.bankEnglish === ${JSON.stringify(draftQuestion)}).value`), /held-out/);
  await click('保存并用于本场');
  await wait(() => ev('!document.querySelector(".library-panel")'));
  assert.equal((await create()).resumeText, draftResume);

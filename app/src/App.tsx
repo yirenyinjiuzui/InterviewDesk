@@ -399,9 +399,12 @@ export function App() {
     }).catch((error: Error) => setRestoreError(error.message));
 
     const handleAsrEvent = (ev: AsrEvent) => {
-      if (settingsRef.current?.ui.workspace === 'written') return;
-      const sid = currentIdRef.current;
-      if (ev.kind === 'partial' || ev.kind === 'segment') {
+      const speech = ev.kind === 'partial' || ev.kind === 'segment';
+      const sid = speech ? ev.sessionId : currentIdRef.current;
+      const active = sid === currentIdRef.current && settingsRef.current?.ui.workspace !== 'written';
+      if (speech && !sessionsRef.current.some(s => s.id === sid && sessionWorkspace(s) === 'interview')) return;
+      if (!active && ev.kind !== 'segment') return;
+      if (active && speech) {
         if (ev.speaker === 'me') candidatePartialSession.current = ev.kind === 'partial' && ev.text ? sid : undefined;
         else if (continuousRef.current && candidatePartialSession.current !== sid) {
           const pending = questionsRef.current[sid];
@@ -422,7 +425,7 @@ export function App() {
         setHud((old) => ({ ...old, lastAsrFirstMs: measuredMs(ev.firstTextTs, ev.speechStartTs) }));
         setPartials((p) => ({ ...p, [ev.speaker]: ev.text }));
       } else if (ev.kind === 'segment') {
-        setPartials((p) => ({ ...p, [ev.speaker]: undefined })); // final replaces the live partial
+        if (active) setPartials((p) => ({ ...p, [ev.speaker]: undefined })); // final replaces the live partial
         const q = questionsRef.current[sid] ?? emptyQuestion();
         const finalSegment: TranscriptSegment = { id: ev.id, text: ev.text, speaker: ev.speaker,
           startTs: Number.isFinite(ev.timings.speechStartTs) ? ev.timings.speechStartTs : Date.now(), endTs: Number.isFinite(ev.timings.speechEndTs) ? ev.timings.speechEndTs : Date.now() };
@@ -430,7 +433,7 @@ export function App() {
         const nextQuestion = advanceQuestion(q, finalSegment);
         updateQuestion(sid, nextQuestion);
         recordTrace(sid, { kind: 'final', at: Date.now(), speaker: ev.speaker ?? 'them',
-          speechStartTs: finalSegment.startTs, speechEndTs: finalSegment.endTs, continuous: continuousRef.current,
+          speechStartTs: finalSegment.startTs, speechEndTs: finalSegment.endTs, continuous: active && continuousRef.current,
           pendingQuestionStartTs: autoQuestion(nextQuestion) ? nextQuestion.block?.startTs : undefined });
         const superseded = (sessionsRef.current.find((s) => s.id === sid)?.turns ?? []).filter((turn) =>
           turn.kind === 'continuous' && turn.status === 'streaming' && turn.label === q.block?.text &&
@@ -438,16 +441,18 @@ export function App() {
           nextQuestion.block?.text !== q.block?.text);
         for (const turn of superseded) { remainingModels.current.delete(turn.id); window.mc.llmCancel(turn.id); }
         const { finalMs: e2eMs, inferMs, firstMs } = transcriptLatency(ev.timings, Date.now());
-        if (e2eMs !== undefined) e2eSamples.current.push(e2eMs);
-        if (e2eSamples.current.length > 200) e2eSamples.current.shift();
-        setHud({
-          lastE2eMs: e2eMs,
-          lastInferMs: inferMs,
-          lastAsrFirstMs: firstMs,
-          p50: percentile(e2eSamples.current, 50),
-          p95: percentile(e2eSamples.current, 95),
-          count: e2eSamples.current.length,
-        });
+        if (active) {
+          if (e2eMs !== undefined) e2eSamples.current.push(e2eMs);
+          if (e2eSamples.current.length > 200) e2eSamples.current.shift();
+          setHud({
+            lastE2eMs: e2eMs,
+            lastInferMs: inferMs,
+            lastAsrFirstMs: firstMs,
+            p50: percentile(e2eSamples.current, 50),
+            p95: percentile(e2eSamples.current, 95),
+            count: e2eSamples.current.length,
+          });
+        }
         setSessions((list) =>
           list.map((s) =>
             s.id === sid

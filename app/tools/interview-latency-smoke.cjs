@@ -53,7 +53,10 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
    }
  })()`);
  const now=Date.now();
- const emit=event=>mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify(event)})`);
+ const emit=async event=>{
+   const sessionId=await ev('document.querySelector(".session-select").value');
+   return mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify({sessionId,...event})})`);
+ };
  assert.match(await ev('document.querySelector(".status-hud").innerText'),/转录首字 —/);
  await emit({kind:'partial',speaker:'them',text:'测试首字',speechStartTs:now-1000,firstTextTs:now-700});
  await wait(()=>ev('document.querySelector(".status-hud").innerText.includes("0.30s")'));

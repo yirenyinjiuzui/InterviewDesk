@@ -35,3 +35,36 @@ it('initializes missing history and round trips legacy session data', () => {
   store.save(history);
   expect(new SessionStore(file).load()).toEqual(history);
 });
+
+it('does not overwrite history changed by another instance after loading', () => {
+  const original = { sessions: [{ id: 'A', name: 'A', createdAt: 1, turns: [] }], currentId: 'A' };
+  const newer = { sessions: [{ id: 'B', name: 'B', createdAt: 2, turns: [] }], currentId: 'B' };
+  const first = new SessionStore(file);
+  first.save(original);
+  const second = new SessionStore(file);
+  expect(second.load()).toEqual(original);
+  second.save(newer);
+  const saved = readFileSync(file);
+  expect(() => first.save(empty)).toThrow();
+  expect(readFileSync(file)).toEqual(saved);
+  expect(() => first.save(original)).toThrow();
+  expect(first.load()).toEqual(newer);
+  expect(() => first.save(newer)).not.toThrow();
+});
+
+it('does not overwrite corrupted, deleted or newly created history after a successful load', () => {
+  const store = new SessionStore(file);
+  store.save(empty);
+  writeFileSync(file, '{"sessions":[');
+  expect(() => store.save(empty)).toThrow();
+  expect(readFileSync(file, 'utf8')).toBe('{"sessions":[');
+  writeFileSync(file, JSON.stringify(empty));
+  store.load();
+  rmSync(file);
+  expect(() => store.save(empty)).toThrow();
+  const missing = new SessionStore(file);
+  expect(missing.load()).toEqual(empty);
+  writeFileSync(file, JSON.stringify(empty));
+  expect(() => missing.save(empty)).toThrow();
+  expect(readFileSync(file, 'utf8')).toBe(JSON.stringify(empty));
+});

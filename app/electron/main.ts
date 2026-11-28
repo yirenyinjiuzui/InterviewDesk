@@ -602,7 +602,7 @@ function bootstrap(): void {
     }
     ipcMain.on(IPC.capturePcm, (_e, buf: ArrayBuffer, captureTs: number, channel: Speaker, sid?: string) => {
       const speaker = channel === 'me' ? 'me' : 'them';
-      const forwarded = asr.sendPcm(buf, captureTs, speaker);
+      const forwarded = asr.sendPcm(buf, captureTs, speaker, sid);
       if (!sid) return;
       const at = Date.now();
       let batch = frameBatches.get(speaker);
@@ -698,7 +698,7 @@ function bootstrap(): void {
     });
     ipcMain.on(IPC.captureChannel, (_e, channel: Speaker, active: boolean, sid?: string) => {
       if ((channel === 'them' || channel === 'me') && typeof active === 'boolean') {
-        asr.setCapture(channel, active);
+        asr.setCapture(channel, active, sid);
         recordChannel(channel, active, sid);
       }
     });
