@@ -119,6 +119,21 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  await cmd('Emulation.setDeviceMetricsOverride',{width:640,height:700,deviceScaleFactor:1,mobile:false});await sleep(150);const screenshot=await cmd('Page.captureScreenshot');fs.writeFileSync(path.join(dir,'reading.png'),Buffer.from(screenshot.data,'base64'));
  assert.equal(await ev('document.querySelector(".pane-answer").scrollWidth<=document.querySelector(".pane-answer").clientWidth'),true);
  const beforeLegacyRewrite=answers().length;await select('legacy');await inTurn(0,'更短');await wait(()=>answers().length===beforeLegacyRewrite+1);assert.equal(answers().at(-1).body.model,'text');assert.equal(answers().at(-1).auth,'Bearer fixture-text');
- console.log(JSON.stringify({ok:true,profile:dir,answers:answers().length,translations:translations().length,checks:['parallel translation and streaming answer','complete original question','all three selected-answer revisions','rewrite cancellation keeps original','translation failure and independent retry','pin and paste scripts','clear preserves scripts','collapse and preference persist','old session compatibility','stream pauses on scroll up, jump returns to bottom and follows later chunks','two models share one translation','revision keeps selected model','Chinese answers','revision keeps original language','legacy text answer keeps text account after mode switch','Ctrl+Enter','640px layout']}));
+ // Session history deletion requires an explicit second action on the same session.
+ await wait(()=>ev('document.querySelectorAll(".session .cursor").length===0'));
+ await select('reading');
+ const deleteMenu=async()=>{await ev('document.querySelector(".session-more").open=true');await click('删除会话');};
+ const deleteGroup='document.querySelector("[aria-label=\\"确认删除会话\\"]")';
+ const persisted=()=>ev('(async()=>{const f=await window.mc.loadSessions();return f.sessions.map(s=>s.id).sort()})()');
+ await deleteMenu();await wait(()=>ev(`!!${deleteGroup}`));
+ assert.ok((await ev(`${deleteGroup}.innerText`)).includes(await ev('document.querySelector(".session-select").selectedOptions[0].textContent')));
+ assert.deepEqual(await persisted(),['legacy','reading']);
+ await ev(`${deleteGroup}.querySelector('button').click()`);await wait(()=>ev(`!${deleteGroup}`));
+ assert.deepEqual(await persisted(),['legacy','reading']);
+ await deleteMenu();await select('legacy');await wait(()=>ev(`!${deleteGroup}`));assert.deepEqual(await persisted(),['legacy','reading']);
+ await select('reading');await deleteMenu();await click('确认删除');
+ await wait(async()=>JSON.stringify(await persisted())==='["legacy"]');
+ await reload();assert.equal(await ev('document.querySelector(".session-select").value'),'legacy');
+ console.log(JSON.stringify({ok:true,profile:dir,answers:answers().length,translations:translations().length,checks:['parallel translation and streaming answer','complete original question','all three selected-answer revisions','rewrite cancellation keeps original','translation failure and independent retry','pin and paste scripts','clear preserves scripts','collapse and preference persist','old session compatibility','stream pauses on scroll up, jump returns to bottom and follows later chunks','two models share one translation','revision keeps selected model','Chinese answers','revision keeps original language','legacy text answer keeps text account after mode switch','Ctrl+Enter','640px layout','session deletion confirmation, cancel, switch and persistence']}));
  }finally{ws?.close();if(child?.pid)try{execFileSync('taskkill',['/pid',String(child.pid),'/T','/F'],{stdio:'ignore'});}catch{}server.closeAllConnections();server.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

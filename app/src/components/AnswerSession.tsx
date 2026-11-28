@@ -92,6 +92,7 @@ export function AnswerSession({
   const [scriptTitle, setScriptTitle] = useState('');
   const [scriptText, setScriptText] = useState('');
   const [nameDraft, setNameDraft] = useState('');
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const currentSession = sessions.find((s) => s.id === currentId);
   const currentName = currentSession?.name ?? '';
 
@@ -101,6 +102,7 @@ export function AnswerSession({
 
   useEffect(() => {
     setStick(true);
+    setPendingDeleteId(null);
     setAddingScript(false);
     setScriptTitle('');
     setScriptText('');
@@ -170,10 +172,28 @@ export function AnswerSession({
             <button className="btn btn-sm" onClick={(e) => { setAddingScript((v) => !v); e.currentTarget.closest('details')?.removeAttribute('open'); }}>{t.uiLang === 'zh' ? '添加讲稿' : 'Add script'}</button>
             <button className="btn btn-sm" onClick={() => { setNameDraft(currentName); setEditing(true); }} title={t.answer.renameTitle}>{t.uiLang === 'zh' ? '重命名会话' : 'Rename session'}</button>
             <button className="btn btn-sm" onClick={onClear} title={`${t.answer.clearTitle} · ${t.uiLang === 'zh' ? '保留固定讲稿' : 'Keeps pinned scripts'}${clearShortcut ? ` (${clearShortcut})` : ''}`}>{t.answer.clear}</button>
-            <button className="btn btn-sm" onClick={() => onDelete(currentId)} title={t.answer.deleteTitle}>{t.uiLang === 'zh' ? '删除会话' : 'Delete session'}</button>
+            <button className="btn btn-sm" disabled={!currentSession} onClick={(e) => {
+              setPendingDeleteId(currentId);
+              e.currentTarget.closest('details')?.removeAttribute('open');
+            }} title={t.answer.deleteTitle}>{t.uiLang === 'zh' ? '删除会话' : 'Delete session'}</button>
           </div>
         </details>
       </header>
+      {pendingDeleteId === currentId && currentSession && (
+        <div className="kb-notice" role="group" aria-label={t.uiLang === 'zh' ? '确认删除会话' : 'Confirm session deletion'}>
+          <div>{t.uiLang === 'zh'
+            ? `确定删除「${currentName}」？此会话的历史和资料将被删除，无法撤销。`
+            : `Delete "${currentName}"? This removes its history and materials and cannot be undone.`}</div>
+          <div className="library-actions">
+            <button className="btn btn-sm" onClick={() => setPendingDeleteId(null)}>{t.uiLang === 'zh' ? '取消' : 'Cancel'}</button>
+            <button className="btn btn-sm" onClick={() => {
+              const id = pendingDeleteId;
+              setPendingDeleteId(null);
+              onDelete(id);
+            }}>{t.uiLang === 'zh' ? '确认删除' : 'Confirm delete'}</button>
+          </div>
+        </div>
+      )}
       {addingScript && <form className="script-editor" onSubmit={(e) => { e.preventDefault(); if (!scriptText.trim()) return; onAddScript(scriptTitle.trim() || (t.uiLang === 'zh' ? '讲稿' : 'Script'), scriptText.trim()); setAddingScript(false); setScriptText(''); setScriptTitle(''); }}>
         <input aria-label={t.uiLang === 'zh' ? '讲稿标题' : 'Script title'} placeholder={t.uiLang === 'zh' ? '讲稿标题' : 'Script title'} value={scriptTitle} onChange={(e) => setScriptTitle(e.target.value)} />
         <textarea aria-label={t.uiLang === 'zh' ? '讲稿内容' : 'Script text'} placeholder={t.uiLang === 'zh' ? '粘贴已确认的讲稿' : 'Paste your confirmed script'} rows={4} value={scriptText} onChange={(e) => setScriptText(e.target.value)} />
