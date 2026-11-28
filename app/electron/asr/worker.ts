@@ -45,6 +45,7 @@ function listen(cb: (msg: WorkerInMessage) => void): void {
 type Channel = 'them' | 'me';
 
 interface PendingSegment {
+  sessionId?: string;
   pcm: Float32Array;
   startTs: number;
   endTs: number;
@@ -74,8 +75,16 @@ const PARTIAL_INTERVAL_MS = 1400;
 // ---- true-streaming backend state (backend === 'cloud-realtime') ----
 /** Live WS session per channel; closed on capture stop or idle. */
 const streams: Record<Channel, StreamingSession | null> = { them: null, me: null };
-/** wallclock of each session's audio t=0 (maps service sentence times) */
-const streamEpoch: Record<Channel, number> = { them: 0, me: 0 };
+const captureSession: Partial<Record<Channel, string>> = {};
+
+// Keep timing and ownership with the socket while it drains its last sentence.
+interface StreamTimeline {
+  sessionId?: string;
+  epoch: number;
+  audioMs: number;
+  drainingForSwitch: boolean;
+}
+const timelines: Partial<Record<Channel, StreamTimeline>> = {};
 /** last time the channel's VAD saw speech (drives idle close) */
 const lastSpeechAt: Record<Channel, number> = { them: 0, me: 0 };
 /** A new capture opens its connection before the first spoken syllable. */
@@ -95,11 +104,9 @@ const STREAM_IDLE_CLOSE_MS = 10_000;
 const captureAllowed: Partial<Record<Channel, boolean>> = {};
 let preconnectOnCapture = false;
 const streamGeneration: Record<Channel, number> = { them: 0, me: 0 };
-const streamAudioMs: Record<Channel, number> = { them: 0, me: 0 };
 const failures: Record<Channel, number> = { them: 0, me: 0 };
 const retryAt: Record<Channel, number> = { them: 0, me: 0 };
 const retryPending: Record<Channel, boolean> = { them: false, me: false };
-const firstTexts: Record<Channel, Map<number, number>> = { them: new Map(), me: new Map() };
 const localFirstText: Record<Channel, { startTs: number; at: number } | undefined> = { them: undefined, me: undefined };
 
 
@@ -156,13 +163,13 @@ function handleVadEvents(events: ReturnType<VadSegmenter['push']>, channel: Chan
     if (ev.type === 'speech-start') {
       post({ type: 'status', state: 'speech', queuedSegments: queue.length });
     } else if (ev.type === 'partial') {
-      void doPartial(ev.pcm, channel, ev.startTs);
+      void doPartial(ev.pcm, channel, ev.startTs, captureSession[channel]);
     } else if (ev.type === 'segment') {
       if (queue.length >= MAX_QUEUE) {
         queue.shift();
         post({ type: 'error', message: 'transcribe queue overflow, dropped oldest segment', fatal: false });
       }
-      queue.push({ pcm: ev.pcm, startTs: ev.startTs, endTs: ev.endTs, vadCloseTs: Date.now(), speaker: channel });
+      queue.push({ sessionId: captureSession[channel], pcm: ev.pcm, startTs: ev.startTs, endTs: ev.endTs, vadCloseTs: Date.now(), speaker: channel });
       void pump();
     }
   }
@@ -180,38 +187,39 @@ function preconnect(ch: Channel): void {
 function ensureStream(ch: Channel, frameStartTs: number): void {
   if (streams[ch] || !engine || !isStreamingEngine(engine) || shuttingDown || captureAllowed[ch] === false || Date.now() < retryAt[ch]) return;
   const ringDur = ring[ch].reduce((a, c) => a + c.ms, 0);
-  streamEpoch[ch] = frameStartTs - ringDur;
+  const timeline: StreamTimeline = { sessionId: captureSession[ch], epoch: frameStartTs - ringDur, audioMs: ringDur, drainingForSwitch: false };
+  timelines[ch] = timeline;
   const generation = ++streamGeneration[ch];
-  streamAudioMs[ch] = ringDur;
-  firstTexts[ch].clear();
+  const firstTexts = new Map<number, number>();
   const recoveredAudio = retryPending[ch] ? ring[ch].map(frame => frame.pcm) : undefined;
   retryPending[ch] = false;
-  const validBegin = (begin?: number) => Number.isFinite(begin) && begin! >= 0 && begin! <= streamAudioMs[ch] + 500;
+  const validBegin = (begin?: number) => Number.isFinite(begin) && begin! >= 0 && begin! <= timeline.audioMs + 500;
   const session = engine.openSession(
     {
       onPartial: (text, timing) => {
         if (shuttingDown || generation !== streamGeneration[ch] || isJunkTranscript(text)) return;
-        const epoch = streamEpoch[ch];
+        const epoch = timeline.epoch;
         const begin = timing?.beginMs;
         const valid = validBegin(begin);
-        if (valid && !firstTexts[ch].has(begin!)) {
-          if (firstTexts[ch].size >= 16) firstTexts[ch].delete(firstTexts[ch].keys().next().value!);
-          firstTexts[ch].set(begin!, Date.now());
+        if (valid && !firstTexts.has(begin!)) {
+          if (firstTexts.size >= 16) firstTexts.delete(firstTexts.keys().next().value!);
+          firstTexts.set(begin!, Date.now());
         }
         failures[ch] = 0;
-        post({ type: 'partial', speaker: ch, text, speechStartTs: valid ? epoch + begin! : undefined,
-          firstTextTs: valid ? firstTexts[ch].get(begin!) : undefined });
+        post({ type: 'partial', sessionId: timeline.sessionId, speaker: ch, text, speechStartTs: valid ? epoch + begin! : undefined,
+          firstTextTs: valid ? firstTexts.get(begin!) : undefined });
       },
       onSentence: (s) => {
-        if (shuttingDown || generation !== streamGeneration[ch] || isJunkTranscript(s.text)) return;
-        const epoch = streamEpoch[ch];
+        if (shuttingDown || (generation !== streamGeneration[ch] && !timeline.drainingForSwitch) || isJunkTranscript(s.text)) return;
+        const epoch = timeline.epoch;
         const now = Date.now();
-        const valid = validBegin(s.beginMs) && Number.isFinite(s.endMs) && s.endMs >= s.beginMs && s.endMs <= streamAudioMs[ch] + 500;
-        failures[ch] = 0;
-        const firstTextTs = valid ? firstTexts[ch].get(s.beginMs) ?? now : undefined;
-        firstTexts[ch].delete(s.beginMs);
+        const valid = validBegin(s.beginMs) && Number.isFinite(s.endMs) && s.endMs >= s.beginMs && s.endMs <= timeline.audioMs + 500;
+        if (generation === streamGeneration[ch]) failures[ch] = 0;
+        const firstTextTs = valid ? firstTexts.get(s.beginMs) ?? now : undefined;
+        firstTexts.delete(s.beginMs);
         post({
           type: 'segment',
+          sessionId: timeline.sessionId,
           id: ++segCounter,
           text: s.text,
           lang: undefined,
@@ -228,6 +236,7 @@ function ensureStream(ch: Channel, frameStartTs: number): void {
       onError: (message, unsent = []) => {
         if (generation !== streamGeneration[ch] || !streams[ch]) return;
         streams[ch] = null;
+        delete timelines[ch];
         failures[ch]++;
         retryAt[ch] = failures[ch] >= 3 ? Infinity : Date.now() + 1000 * 2 ** (failures[ch] - 1);
         retryPending[ch] = captureAllowed[ch] !== false;
@@ -263,6 +272,31 @@ function closeStream(ch: Channel): void {
   void s.close().catch(() => undefined);
 }
 
+function setCaptureSession(ch: Channel, sessionId?: string): void {
+  if (sessionId === captureSession[ch]) return;
+  if (captureSession[ch] !== undefined) {
+    // Finish old speech before accepting any samples from the next interview.
+    const pending = vads[ch].flush();
+    if (engine && isStreamingEngine(engine)) {
+      drainRetry(ch);
+      if (timelines[ch]) timelines[ch].drainingForSwitch = true;
+      closeStream(ch);
+      streamGeneration[ch]++;
+      delete timelines[ch];
+      lastFrameAt[ch] = 0;
+      failures[ch] = 0;
+      retryAt[ch] = 0;
+      retryPending[ch] = false;
+      ring[ch] = [];
+    } else {
+      handleVadEvents(pending, ch);
+    }
+  } else if (timelines[ch]) {
+    timelines[ch].sessionId = sessionId;
+  }
+  captureSession[ch] = sessionId;
+}
+
 function handleStreamingPcm(pcm: Float32Array, ch: Channel, captureTs: number): void {
   const frameMs = (pcm.length / 16000) * 1000;
   const now = Date.now();
@@ -277,7 +311,7 @@ function handleStreamingPcm(pcm: Float32Array, ch: Channel, captureTs: number): 
       retryAt[ch] = 0;
     } else if (streams[ch]) {
       // Service offsets start at audio sample zero, even when the task opened much earlier.
-      streamEpoch[ch] = captureTs - frameMs;
+      timelines[ch]!.epoch = captureTs - frameMs;
     }
     ensureStream(ch, captureTs - frameMs);
   }
@@ -299,7 +333,7 @@ function handleStreamingPcm(pcm: Float32Array, ch: Channel, captureTs: number): 
 
   if (!streams[ch] && (vads[ch].state === 'speech' || retryPending[ch])) ensureStream(ch, captureTs - frameMs);
   if (streams[ch]) {
-    streamAudioMs[ch] += frameMs;
+    timelines[ch]!.audioMs += frameMs;
     // stream every frame (speech AND trailing silence) so the service's
     // sentence timing stays continuous; cost is bounded by the idle close
     streams[ch]!.push(pcm);
@@ -325,7 +359,7 @@ setInterval(() => {
  * already in flight (latest-wins). Uses the channel's sticky language to avoid
  * paying for LID on every partial.
  */
-async function doPartial(pcm: Float32Array, channel: Channel, startTs: number): Promise<void> {
+async function doPartial(pcm: Float32Array, channel: Channel, startTs: number, sessionId?: string): Promise<void> {
   if (!engine || transcribing || partialBusy || queue.length > 0 || shuttingDown) return;
   partialBusy = true;
   try {
@@ -333,7 +367,7 @@ async function doPartial(pcm: Float32Array, channel: Channel, startTs: number): 
     const r = await engine.transcribe(pcm, lang);
     if (!isJunkTranscript(r.text) && !transcribing) {
       if (localFirstText[channel]?.startTs !== startTs) localFirstText[channel] = { startTs, at: Date.now() };
-      post({ type: 'partial', speaker: channel, text: r.text, speechStartTs: startTs, firstTextTs: localFirstText[channel]!.at });
+      post({ type: 'partial', sessionId, speaker: channel, text: r.text, speechStartTs: startTs, firstTextTs: localFirstText[channel]!.at });
     }
   } catch {
     /* partials are best-effort */
@@ -390,6 +424,7 @@ async function pump(): Promise<void> {
     if (!isJunkTranscript(r.text)) {
       post({
         type: 'segment',
+        sessionId: seg.sessionId,
         id: ++segCounter,
         text: r.text,
         lang: r.lang ?? (effLang === 'auto' ? undefined : effLang),
@@ -429,12 +464,14 @@ listen((msg: WorkerInMessage) => {
             );
       const ch: Channel = msg.channel === 'me' ? 'me' : 'them';
       if (captureAllowed[ch] === false) break;
+      setCaptureSession(ch, msg.sessionId);
       if (isStreamingEngine(engine)) handleStreamingPcm(pcm, ch, msg.captureTs);
       else handleVadEvents(vads[ch].push(pcm, msg.captureTs), ch);
       break;
     }
     case 'capture': {
       const ch = msg.channel;
+      if (msg.active && msg.sessionId) setCaptureSession(ch, msg.sessionId);
       if (msg.active && captureAllowed[ch] === true) break;
       if (!msg.active) drainRetry(ch);
       captureAllowed[ch] = msg.active;

@@ -411,6 +411,7 @@ export interface SegmentTimings {
 
 export interface AsrSegmentEvent {
   kind: 'segment';
+  sessionId: string;
   id: number;
   text: string;
   lang?: string;
@@ -444,6 +445,7 @@ export interface AsrPartialEvent {
   speechStartTs?: number;
   firstTextTs?: number;
   kind: 'partial';
+  sessionId: string;
   speaker: Speaker;
   text: string;
 }

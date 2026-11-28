@@ -77,12 +77,12 @@ it('connects on capture silence, preserves timing, and retains the idle cost gat
 });
 
 
-async function boot(preconnectOnCapture = false) {
+async function boot(preconnectOnCapture = false, backend = 'cloud-realtime') {
   vi.useFakeTimers(); vi.setSystemTime(100000);
   const port = new EventEmitter(); state.port.on.mockImplementation(port.on.bind(port));
   await import('../electron/asr/worker');
   const send = (message: unknown) => port.emit('message', message);
-  send({ type: 'init', backend: 'cloud-realtime', language: 'auto', preconnectOnCapture, cloud: { baseUrl: 'ws://localhost', model: 'test', apiKey: '' } });
+  send({ type: 'init', backend, language: 'auto', preconnectOnCapture, cloud: { baseUrl: 'ws://localhost', model: 'test', apiKey: 'fixture' } });
   await Promise.resolve();
   const frame = (channel = 'them') => send({ type: 'pcm', pcm: new Float32Array(1600), captureTs: Date.now(), channel });
   const frames = (count: number) => { for (let i = 0; i < count; i++) { vi.advanceTimersByTime(100); frame(); } };
@@ -130,6 +130,51 @@ it('leaves a shared realtime engine without cloud preconnect on demand', async (
   expect(state.sessions).toHaveLength(0);
   frame();
   expect(state.sessions).toHaveLength(1);
+});
+
+it.each([false, true])('delivers a delayed final to the owner of its audio (stop and preconnect: %s)', async restart => {
+  const { send } = await boot(restart);
+  const frame = (sessionId: string) => send({ type: 'pcm', channel: 'them', sessionId,
+    captureTs: Date.now(), pcm: new Float32Array(1600) });
+  send({ type: 'capture', channel: 'them', active: true, sessionId: 'A' });
+  frame('A');
+  const previous = state.sessions[0];
+  previous.callbacks.onPartial('first question', { beginMs: 0 });
+  if (restart) {
+    send({ type: 'capture', channel: 'them', active: false, sessionId: 'A' });
+    send({ type: 'capture', channel: 'them', active: true, sessionId: 'B' });
+  }
+  frame('B');
+  expect(previous.close).toHaveBeenCalledOnce();
+  const current = state.sessions[1];
+  current.callbacks.onPartial('next question', { beginMs: 0 });
+  previous.callbacks.onSentence({ text: 'first question?', beginMs: 0, endMs: 100 });
+  current.callbacks.onSentence({ text: 'next question?', beginMs: 0, endMs: 100 });
+  const results = state.port.postMessage.mock.calls.map(([event]) => event)
+    .filter(event => event.type === 'partial' || event.type === 'segment');
+  expect(results.map(event => [event.type, event.text, event.sessionId])).toEqual([
+    ['partial', 'first question', 'A'], ['partial', 'next question', 'B'],
+    ['segment', 'first question?', 'A'], ['segment', 'next question?', 'B'],
+  ]);
+});
+
+it('keeps queued batch transcriptions with their original interview when capture moves on', async () => {
+  const { CloudAsrEngine } = await import('../electron/asr/cloudEngine');
+  const transcribe = vi.spyOn(CloudAsrEngine.prototype, 'transcribe')
+    .mockResolvedValueOnce({ text: 'previous interview', inferMs: 10 })
+    .mockResolvedValueOnce({ text: 'current interview', inferMs: 10 });
+  const { send } = await boot(false, 'cloud');
+  for (const sessionId of ['A', 'B']) {
+    send({ type: 'pcm', channel: 'me', sessionId, captureTs: Date.now(),
+      pcm: new Float32Array(4800).fill(0.2) });
+    vi.advanceTimersByTime(300);
+  }
+  send({ type: 'flush' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(transcribe).toHaveBeenCalledTimes(2);
+  const finals = state.port.postMessage.mock.calls.map(([event]) => event).filter(event => event.type === 'segment');
+  expect(finals.map(event => [event.sessionId, event.text])).toEqual([['A', 'previous interview'], ['B', 'current interview']]);
+  transcribe.mockRestore();
 });
 
 it('reopens after a capture gap and ignores results from the old audio timeline', async () => {

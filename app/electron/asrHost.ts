@@ -26,7 +26,7 @@ export interface AsrHostOptions {
 
 export class AsrHost {
   private child: Electron.UtilityProcess | null = null;
-  private captureState = new Map<'them' | 'me', boolean>();
+  private captureState = new Map<'them' | 'me', { active: boolean; sessionId?: string }>();
   private listeners = new Set<(ev: AsrEvent) => void>();
   /** replayed to late-attaching windows */
   lastReady: AsrEvent | null = null;
@@ -72,8 +72,10 @@ export class AsrHost {
           this.emit({ kind: 'ready', loadMs: msg.loadMs, warmMs: msg.warmMs, ep: msg.ep, gpuSuspect: msg.gpuSuspect });
           break;
         case 'segment':
+          if (!msg.sessionId) break;
           this.emit({
             kind: 'segment',
+            sessionId: msg.sessionId,
             id: msg.id,
             text: msg.text,
             lang: msg.lang,
@@ -90,7 +92,8 @@ export class AsrHost {
           });
           break;
         case 'partial':
-          this.emit({ kind: 'partial', speaker: msg.speaker, text: msg.text, speechStartTs: msg.speechStartTs, firstTextTs: msg.firstTextTs });
+          if (!msg.sessionId) break;
+          this.emit({ kind: 'partial', sessionId: msg.sessionId, speaker: msg.speaker, text: msg.text, speechStartTs: msg.speechStartTs, firstTextTs: msg.firstTextTs });
           break;
         case 'status':
           this.emit({ kind: 'status', state: msg.state, queuedSegments: msg.queuedSegments });
@@ -119,23 +122,23 @@ export class AsrHost {
       preconnectOnCapture: opts.preconnectOnCapture,
       cloud: opts.cloud,
     });
-    for (const [channel, active] of this.captureState) this.send({ type: 'capture', channel, active });
+    for (const [channel, state] of this.captureState) this.send({ type: 'capture', channel, ...state });
   }
 
   private send(msg: WorkerInMessage): void {
     this.child?.postMessage(msg);
   }
 
-  sendPcm(buf: ArrayBuffer, captureTs: number, channel: 'them' | 'me'): boolean {
-    if (!this.child || this.captureState.get(channel) === false) return false;
+  sendPcm(buf: ArrayBuffer, captureTs: number, channel: 'them' | 'me', sessionId?: string): boolean {
+    if (!this.child || this.captureState.get(channel)?.active === false) return false;
     // ~6.4 KB per 100 ms frame — structured-clone copy is negligible
-    this.send({ type: 'pcm', pcm: new Float32Array(buf), captureTs, channel });
+    this.send({ type: 'pcm', pcm: new Float32Array(buf), captureTs, channel, sessionId });
     return true;
   }
 
-  setCapture(channel: 'them' | 'me', active: boolean): void {
-    this.captureState.set(channel, active);
-    this.send({ type: 'capture', channel, active });
+  setCapture(channel: 'them' | 'me', active: boolean, sessionId?: string): void {
+    this.captureState.set(channel, { active, sessionId });
+    this.send({ type: 'capture', channel, active, sessionId });
   }
 
   setLanguage(language: 'auto' | string): void {

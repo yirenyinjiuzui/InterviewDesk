@@ -100,7 +100,10 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  mainWs=new WebSocket(mainTarget.webSocketDebuggerUrl);await new Promise(r=>mainWs.once('open',r));
  const mainEval=expression=>new Promise((resolve,reject)=>{const id=++mainSeq;const handle=raw=>{const msg=JSON.parse(raw);if(msg.id!==id)return;mainWs.off('message',handle);if(msg.result?.exceptionDetails)reject(Error(JSON.stringify(msg.result.exceptionDetails)));else resolve(msg.result);};mainWs.on('message',handle);mainWs.send(JSON.stringify({id,method:'Runtime.evaluate',params:{expression,returnByValue:true}}));});
  const time=Date.now()-10000;const event={kind:'segment',id:time,text:'Next question, how do you evaluate retrieval?',speaker:'them',lang:'en',timings:{speechStartTs:time,speechEndTs:time+2000,inferStartTs:time+2000,inferEndTs:time+2100}};
- const emit=(asr=event)=>mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify(asr)})`);
+ const emit=async (asr=event)=>{
+   const sessionId=await ev('document.querySelector(".session-select").value');
+   return mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify({sessionId,...asr})})`);
+ };
  await click('持续答');before=calls.length;await emit();await wait(()=>ev('document.querySelectorAll(".session .turn").length===1'));
  await wait(()=>ev('document.querySelector(".session .turn").innerText.includes("中文翻译：")'));await sleep(500);assert.equal(calls.length,before,'exact ASR reuse sends neither answer nor memo API requests');
  assert.match(await ev('document.querySelector(".session .turn").innerText'),/Saved answer/);assert.equal(await ev('document.querySelector(".current-question").open'),false);
