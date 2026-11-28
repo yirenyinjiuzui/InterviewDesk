@@ -2,7 +2,7 @@
 
 InterviewDesk 是 Windows 面试与笔试辅助工具。面试时可以转录双方发言，结合简历和岗位要求逐题生成答案；笔试时可以框选题目，让多个视觉模型分别作答。
 
-**[下载 Windows x64 便携版](https://github.com/yirenyinjiuzui/InterviewDesk/releases/latest)** · [版本说明](docs/releases/0.3.17.md)
+**[下载 Windows x64 便携版](https://github.com/yirenyinjiuzui/InterviewDesk/releases/latest)** · [版本说明](docs/releases/0.3.18.md)
 
 ## 开始使用
 

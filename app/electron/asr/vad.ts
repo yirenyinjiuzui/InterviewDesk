@@ -174,7 +174,11 @@ export class VadSegmenter {
 
   /** Force-close any open segment (capture stopped). */
   flush(): VadEvent[] {
-    if (!this.inSpeech) return [];
+    if (!this.inSpeech) {
+      this.preRoll = [];
+      this.preRollMsHeld = 0;
+      return [];
+    }
     const ev = this.close('flush');
     return ev ? [ev] : [];
   }

@@ -33,7 +33,10 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  mainWs=new WebSocket(mainTarget.webSocketDebuggerUrl);await new Promise(r=>mainWs.once('open',r));
  const mainEval=expression=>new Promise((resolve,reject)=>{const id=++mainSeq;const handle=raw=>{const msg=JSON.parse(raw);if(msg.id!==id)return;mainWs.off('message',handle);if(msg.result?.exceptionDetails)reject(Error(JSON.stringify(msg.result.exceptionDetails)));else resolve(msg.result);};mainWs.on('message',handle);mainWs.send(JSON.stringify({id,method:'Runtime.evaluate',params:{expression,returnByValue:true}}));});
  let audioTs=Date.now()-100000;
- const emit=event=>mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify(event)})`);
+ const emit=async event=>{
+   const sessionId=await ev('document.querySelector(".session-select").value');
+   return mainEval(`process.mainModule.require('electron').BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/index.html')).webContents.send('asr:event',${JSON.stringify({sessionId,...event})})`);
+ };
  const final=async(text,speaker='them',start=audioTs+=1200)=>{const event={kind:'segment',id:start,text,speaker,lang:'en',timings:{speechStartTs:start,speechEndTs:start+1000,inferStartTs:start+1000,inferEndTs:start+1100}};await emit(event);await sleep(60);return event;};
  const partial=(text,speaker='them')=>emit({kind:'partial',text,speaker});
  const answers=()=>calls.filter(c=>!c.body.messages[0].content.includes('备忘维护器'));
@@ -84,8 +87,21 @@ const click=label=>ev(`(()=>{const b=[...document.querySelectorAll('button')].fi
  await click('生成回答');await wait(()=>answers().length===3);assert.match(answers()[2].body.messages.at(-1).content,/Explain RAG and embeddings/);await sleep(1700);assert.equal(answers().length,3,'corrected answer must not auto-regenerate');
  await final('Next question, describe caching?');await partial('I will answer now','me');await sleep(1700);assert.equal(answers().length,3,'candidate speech cancels pending auto timer');await final('I will answer now','me');
  await final('Next question, explain consistency?');await ev('window.mc.stopAllAnswers()');await sleep(1700);assert.equal(answers().length,3,'stop all suppresses pending automatic answer');
+ const previousSession=await ev('document.querySelector(".session-select").value');
  await final('Next question, describe queues?');await ev(`document.querySelector('.session-bar > button:first-of-type').click()`);
  await sleep(1700);assert.equal(answers().length,3,'switching sessions cancels pending automatic answer');assert.equal(await current(),'');
+ const lateText='How do you test a late transcript?';
+ await click('持续答');
+ const lateStart=audioTs+=5000;
+ await emit({kind:'segment',sessionId:previousSession,id:lateStart,text:lateText,speaker:'them',
+   timings:{speechStartTs:lateStart,speechEndTs:lateStart+500,inferStartTs:lateStart+500,inferEndTs:lateStart+600}});
+ await sleep(1700);
+ const saved=await ev('window.mc.loadSessions()');
+ const occurrences=session=>(session.segments??[]).reduce((n,s)=>n+s.text.split(lateText).length-1,0);
+ assert.equal(occurrences(saved.sessions.find(s=>s.id===previousSession)),1);
+ assert.equal(occurrences(saved.sessions.find(s=>s.id===saved.currentId)),0);
+ assert.equal(answers().length,3,'the late question must not trigger an answer in the new session');
+ await click('持续答');
  await final('Explain transformers?');await sleep(1700);assert.equal(answers().length,3,'new session requires explicit automatic mode enable');
  await click('生成回答');await wait(()=>answers().length===4);assert.doesNotMatch(JSON.stringify(answers()[3].body.messages),/I only built a prototype/);
  await click('持续答');await final('Next question, explain pending fragment?');await wait(()=>answers().length===5);

@@ -23,6 +23,7 @@ export interface WorkerInit {
 
 export interface WorkerPcm {
   type: 'pcm';
+  sessionId?: string;
   /** 16 kHz mono float32 PCM frame (transferred) */
   pcm: Float32Array;
   /** Date.now() at capture of the frame's last sample */
@@ -45,7 +46,7 @@ export interface WorkerShutdown {
   type: 'shutdown';
 }
 
-export type WorkerInMessage = { type: 'capture'; channel: 'them' | 'me'; active: boolean } | WorkerInit | WorkerPcm | WorkerConfig | WorkerFlush | WorkerShutdown;
+export type WorkerInMessage = { type: 'capture'; channel: 'them' | 'me'; active: boolean; sessionId?: string } | WorkerInit | WorkerPcm | WorkerConfig | WorkerFlush | WorkerShutdown;
 
 // ---- worker -> main ----
 
@@ -59,6 +60,7 @@ export interface WorkerReady {
 
 export interface WorkerSegment {
   type: 'segment';
+  sessionId?: string;
   id: number;
   text: string;
   lang?: string;
@@ -76,6 +78,7 @@ export interface WorkerSegment {
 
 export interface WorkerPartial {
   type: 'partial';
+  sessionId?: string;
   speechStartTs?: number;
   firstTextTs?: number;
   speaker: 'them' | 'me';

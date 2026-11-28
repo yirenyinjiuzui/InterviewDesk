@@ -411,6 +411,7 @@ export interface SegmentTimings {
 
 export interface AsrSegmentEvent {
   kind: 'segment';
+  sessionId: string;
   id: number;
   text: string;
   lang?: string;
@@ -444,6 +445,7 @@ export interface AsrPartialEvent {
   speechStartTs?: number;
   firstTextTs?: number;
   kind: 'partial';
+  sessionId: string;
   speaker: Speaker;
   text: string;
 }
@@ -516,7 +518,8 @@ export interface InterviewLibrary {
   questions: string[];
 }
 
-export type InterviewLibraryUpdate = InterviewLibrary | Pick<InterviewLibrary, 'questions' | 'answers'>;
+// Preparation checkpoints append only the completed questions; only a full save replaces the list.
+export type InterviewLibraryUpdate = InterviewLibrary | (Pick<InterviewLibrary, 'questions' | 'answers'> & { mode?: 'prepare' });
 
 export type CaptureTraceEvent =
   | { kind: 'channel'; at: number; speaker: Speaker; active: boolean }
